@@ -16,7 +16,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 2;
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.0.2';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -193,8 +193,9 @@ const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 // and returns a complete, current-version object.
 // - Throws an error with code 'not-ours' if it isn't Gym Log data,
 //   and code 'newer' if a newer version of the app wrote it (we must not downgrade it).
-// - Records that can't be read are skipped, never silently: each one is counted in
-//   report.dropped, and every caller keeps an untouched copy or asks first (see load / importBackup).
+// - Nothing unreadable is dropped silently. Every bad record, and every list that is
+//   missing or isn't a list when that data version must have it, adds to report.dropped.
+//   Callers keep an untouched copy of the original (or block saving) whenever it is > 0.
 function migrate(d, report = { dropped: 0 }) {
   if (!d || typeof d !== 'object' || (!Array.isArray(d.sessions) && !Array.isArray(d.program))) {
     throw Object.assign(new Error('Not Gym Log data'), { code: 'not-ours' });
@@ -205,59 +206,85 @@ function migrate(d, report = { dropped: 0 }) {
   if (d.version > DATA_VERSION) {
     throw Object.assign(new Error('Saved by a newer version'), { code: 'newer' });
   }
+  const version = d.version == null ? 1 : d.version;
+
+  // A list field. Missing is fine only where that data version didn't have it yet.
+  const list = (value, requiredFrom = 1) => {
+    if (Array.isArray(value)) return value;
+    if (value === undefined && version < requiredFrom) return [];
+    report.dropped += 1; // the whole list is unreadable or missing
+    return [];
+  };
   // Keep the items that pass, and count the ones that don't.
   const keep = (arr, ok) => {
-    const list = Array.isArray(arr) ? arr : [];
-    const out = list.filter((x) => { try { return !!ok(x); } catch (_) { return false; } });
-    report.dropped += list.length - out.length;
+    const out = arr.filter((x) => { try { return !!ok(x); } catch (_) { return false; } });
+    report.dropped += arr.length - out.length;
     return out;
   };
+  // Stored numbers must really be numbers. A damaged value is never quietly turned into 0.
+  const num = (v) => {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
+    if (typeof v === 'string' && v.trim() !== '') return Number(v.trim().replace(',', '.'));
+    return NaN;
+  };
+  const isAmount = (v) => Number.isFinite(num(v)) && num(v) >= 0;
+  const isEmpty = (v) => v === null || v === undefined || v === '';
+  const isNutrition = (x) => ['kcal', 'p', 'c', 'f'].every((k) => isAmount(x[k]));
 
   const base = defaultData();
-  const program = keep(d.program, (w) => w && typeof w === 'object')
+
+  let settings = {};
+  if (d.settings !== undefined) {
+    if (d.settings && typeof d.settings === 'object' && !Array.isArray(d.settings)) settings = d.settings;
+    else report.dropped += 1;
+  }
+
+  const program = keep(list(d.program), (w) => w && typeof w === 'object')
     .map((w) => ({
       id: String(w.id || uid()),
       name: String(w.name || 'Workout'),
-      exercises: keep(w.exercises, (e) => e && e.name)
+      exercises: keep(list(w.exercises), (e) => e && e.name)
         .map((e) => ({ id: String(e.id || uid()), name: String(e.name), sets: clampSets(e.sets), reps: String(e.reps ?? '') })),
     }));
-  const sessions = keep(d.sessions, (s) => s && s.finishedAt && !Number.isNaN(new Date(s.finishedAt).getTime()) && Array.isArray(s.entries))
+
+  const sessions = keep(list(d.sessions), (s) => s && s.finishedAt && !Number.isNaN(new Date(s.finishedAt).getTime()) && Array.isArray(s.entries))
     .map((s) => ({
       ...s,
       entries: keep(s.entries, (e) => e && e.name)
         .map((e) => ({
           ...e,
           key: e.key || keyOf(e.name),
-          sets: keep(e.sets, (x) => x && toNum(x.r) != null).map((x) => ({ w: toNum(x.w), r: toNum(x.r) })),
+          sets: keep(list(e.sets), (x) => x && isAmount(x.r) && (isEmpty(x.w) || isAmount(x.w)))
+            .map((x) => ({ w: isEmpty(x.w) ? null : num(x.w), r: num(x.r) })),
         })),
     }))
     .sort((a, b) => new Date(a.finishedAt) - new Date(b.finishedAt));
 
   let active = null;
   if (d.active) {
-    if (Array.isArray(d.active.entries)) active = d.active;
+    if (Array.isArray(d.active.entries) && d.active.entries.every((e) => e && Array.isArray(e.sets))) active = d.active;
     else report.dropped += 1;
   }
 
-  // Added in data version 2. Version-1 data has none of these, which is fine.
-  const bodyweights = keep(d.bodyweights, (b) => b && isDay(b.date) && toNum(b.w) > 0)
-    .map((b) => ({ id: String(b.id || uid()), date: b.date, w: toNum(b.w) }))
+  // Added in data version 2: required from version 2 on, legitimately absent in version 1.
+  const bodyweights = keep(list(d.bodyweights, 2), (b) => b && isDay(b.date) && num(b.w) > 0)
+    .map((b) => ({ id: String(b.id || uid()), date: b.date, w: num(b.w) }))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const foods = keep(d.foods, (x) => x && x.name)
+  const foods = keep(list(d.foods, 2), (x) => x && x.name && isNutrition(x))
     .map((x) => ({
       id: String(x.id || `c-${uid()}`), name: String(x.name), serving: String(x.serving || '1 serving'),
-      kcal: toNum(x.kcal) || 0, p: toNum(x.p) || 0, c: toNum(x.c) || 0, f: toNum(x.f) || 0, custom: true,
+      kcal: num(x.kcal), p: num(x.p), c: num(x.c), f: num(x.f), custom: true,
     }));
-  const foodLog = keep(d.foodLog, (x) => x && isDay(x.date) && x.name)
+  const foodLog = keep(list(d.foodLog, 2), (x) => x && isDay(x.date) && x.name && isNutrition(x) && num(x.qty) > 0)
     .map((x) => ({
       id: String(x.id || uid()), date: x.date, foodId: x.foodId ? String(x.foodId) : null,
-      name: String(x.name), serving: String(x.serving || ''), qty: toNum(x.qty) || 1,
-      kcal: toNum(x.kcal) || 0, p: toNum(x.p) || 0, c: toNum(x.c) || 0, f: toNum(x.f) || 0,
+      name: String(x.name), serving: String(x.serving || ''), qty: num(x.qty),
+      kcal: num(x.kcal), p: num(x.p), c: num(x.c), f: num(x.f),
     }));
 
   return {
     version: DATA_VERSION,
-    settings: { ...base.settings, ...(d.settings && typeof d.settings === 'object' ? d.settings : {}) },
+    settings: { ...base.settings, ...settings },
     program: program.length ? program : base.program,
     sessions,
     active,

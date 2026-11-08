@@ -309,7 +309,8 @@ let startupNotice = '';
 
 // Recovery mode: set when saved data exists but can't be used safely AND we couldn't
 // keep a copy of it. While it is set, save() refuses to write, so nothing is overwritten.
-// { reason: 'unreadable' | 'newer' | 'skipped', raw: the untouched saved text }
+// { reason: 'unreadable' | 'newer' | 'skipped' | 'read-failed', raw: the untouched saved text }
+// For 'read-failed' the browser wouldn't hand over the saved data at all, so raw is null.
 let recovery = null;
 
 // Safety copies live next to the main data as gymlog.v1.<reason>.<timestamp>.
@@ -340,7 +341,8 @@ function load() {
   try {
     raw = localStorage.getItem(STORAGE_KEY);
   } catch (e) {
-    startupNotice = 'This browser is blocking storage, so nothing will be saved. Open the app normally, not in a private tab.';
+    // We can't see what is saved, so we can't know it's safe to write. Pause saving until a reload can read it.
+    recovery = { reason: 'read-failed', raw: null };
     return defaultData();
   }
   if (!raw) return defaultData();
@@ -846,6 +848,10 @@ function importBackup(file) {
         : "That file isn't a Gym Log backup. Nothing was changed.");
       return;
     }
+    if (recovery && recovery.reason === 'read-failed') {
+      toast("Your saved data can't be read right now, so restoring is paused to avoid writing over it. Reload the app first.");
+      return;
+    }
     if (report.dropped > 0 && !confirm(`${report.dropped} record${report.dropped === 1 ? '' : 's'} in this backup can't be read and would be left out. Import the rest anyway?`)) return;
     const n = data.sessions.length;
     if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'} and ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'}.`)) return;
@@ -932,11 +938,19 @@ function foodItemHtml(f) {
 function recoveryHtml() {
   if (!recovery) return '';
   const download = '<button type="button" class="btn small primary" data-action="recovery-download">Download saved data</button>';
+  const reload = '<button type="button" class="btn small" data-action="recovery-reload">Reload app</button>';
+  if (recovery.reason === 'read-failed') {
+    return `
+      <div class="notice warn">
+        <p><strong>Saving is paused.</strong><br><span class="small">The browser wouldn't let the app read your saved data, so it can't tell what's there. Nothing will be saved until it can, so your data can't be overwritten. Reload to try again. If this keeps happening, the browser is blocking site storage (for example a private tab, or site data turned off).</span></p>
+        <div class="row wrap">${reload}</div>
+      </div>`;
+  }
   if (recovery.reason === 'newer') {
     return `
       <div class="notice warn">
         <p><strong>Saving is paused.</strong><br><span class="small">Your data was saved by a newer version of this app. Reload to get that version. Until then nothing is saved, so your data can't be overwritten.</span></p>
-        <div class="row wrap">${download}<button type="button" class="btn small" data-action="recovery-reload">Reload app</button></div>
+        <div class="row wrap">${download}${reload}</div>
       </div>`;
   }
   const what = recovery.reason === 'skipped'
@@ -1866,7 +1880,7 @@ const actions = {
 
   // Recovery and safety copies
   'recovery-download': () => {
-    if (recovery) downloadText(`gym-log-saved-data-${localDate()}.json`, recovery.raw);
+    if (recovery && recovery.raw) downloadText(`gym-log-saved-data-${localDate()}.json`, recovery.raw);
   },
   'recovery-reload': () => location.reload(),
   'recovery-fresh': () => {

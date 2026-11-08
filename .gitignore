@@ -1,0 +1,3 @@
+# Workout backups never go in the repo
+gym-log-backup-*.json
+.DS_Store

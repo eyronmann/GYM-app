@@ -107,7 +107,18 @@ More (program, backup and settings).
 - When another window of the app saves (the `storage` event), this window keeps
   anything that exists only in its memory as a safety copy (`other-window`),
   then reloads so every startup check runs on what was saved. It never writes
-  its own older copy over the other window's data.
+  its own older copy over the other window's data. If there's no room for the
+  copy it doesn't reload: saving pauses (`'conflict'`) and the data is offered
+  as a download.
+- Stale-write check: `save()` remembers the exact text it last read or wrote
+  (`lastSeenRaw`). Before writing it reads storage again; if the text differs,
+  another window saved first, so it doesn't write and handles it as above.
+  Limit: the read and the write are two steps and browsers give pages no lock
+  on localStorage, so a write from another window in the instant between them
+  is not prevented. The check covers the realistic case: a window acting on an
+  old copy before the other window's storage event reaches it.
+- Restoring a backup aborts if the current data can't be read; a failed read is
+  never treated as an empty phone.
 
 ## Built-in data accuracy
 

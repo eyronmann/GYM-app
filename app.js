@@ -16,7 +16,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 2;
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.0.1';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -189,49 +189,66 @@ function defaultData() {
 
 const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-// Takes anything that looks like saved data (from storage or a backup file, any version)
-// and returns a complete, current-version object. Throws if it isn't ours.
-function migrate(d) {
+// Takes anything that looks like saved data (from storage or a backup file, version 1 or 2)
+// and returns a complete, current-version object.
+// - Throws an error with code 'not-ours' if it isn't Gym Log data,
+//   and code 'newer' if a newer version of the app wrote it (we must not downgrade it).
+// - Records that can't be read are skipped, never silently: each one is counted in
+//   report.dropped, and every caller keeps an untouched copy or asks first (see load / importBackup).
+function migrate(d, report = { dropped: 0 }) {
   if (!d || typeof d !== 'object' || (!Array.isArray(d.sessions) && !Array.isArray(d.program))) {
-    throw new Error('Not Gym Log data');
+    throw Object.assign(new Error('Not Gym Log data'), { code: 'not-ours' });
   }
+  if (d.version != null && !(Number.isInteger(d.version) && d.version >= 1)) {
+    throw Object.assign(new Error('Unknown data version'), { code: 'not-ours' });
+  }
+  if (d.version > DATA_VERSION) {
+    throw Object.assign(new Error('Saved by a newer version'), { code: 'newer' });
+  }
+  // Keep the items that pass, and count the ones that don't.
+  const keep = (arr, ok) => {
+    const list = Array.isArray(arr) ? arr : [];
+    const out = list.filter((x) => { try { return !!ok(x); } catch (_) { return false; } });
+    report.dropped += list.length - out.length;
+    return out;
+  };
+
   const base = defaultData();
-  const program = (Array.isArray(d.program) ? d.program : [])
-    .filter((w) => w && typeof w === 'object')
+  const program = keep(d.program, (w) => w && typeof w === 'object')
     .map((w) => ({
       id: String(w.id || uid()),
       name: String(w.name || 'Workout'),
-      exercises: (Array.isArray(w.exercises) ? w.exercises : [])
-        .filter((e) => e && e.name)
+      exercises: keep(w.exercises, (e) => e && e.name)
         .map((e) => ({ id: String(e.id || uid()), name: String(e.name), sets: clampSets(e.sets), reps: String(e.reps ?? '') })),
     }));
-  const sessions = (Array.isArray(d.sessions) ? d.sessions : [])
-    .filter((s) => s && s.finishedAt && Array.isArray(s.entries))
+  const sessions = keep(d.sessions, (s) => s && s.finishedAt && !Number.isNaN(new Date(s.finishedAt).getTime()) && Array.isArray(s.entries))
     .map((s) => ({
       ...s,
-      entries: s.entries
-        .filter((e) => e && e.name)
+      entries: keep(s.entries, (e) => e && e.name)
         .map((e) => ({
           ...e,
           key: e.key || keyOf(e.name),
-          sets: (Array.isArray(e.sets) ? e.sets : []).map((x) => ({ w: toNum(x.w), r: toNum(x.r) })).filter((x) => x.r != null),
+          sets: keep(e.sets, (x) => x && toNum(x.r) != null).map((x) => ({ w: toNum(x.w), r: toNum(x.r) })),
         })),
     }))
     .sort((a, b) => new Date(a.finishedAt) - new Date(b.finishedAt));
 
-  // Added in data version 2.
-  const bodyweights = (Array.isArray(d.bodyweights) ? d.bodyweights : [])
-    .filter((b) => b && isDay(b.date) && toNum(b.w) > 0)
+  let active = null;
+  if (d.active) {
+    if (Array.isArray(d.active.entries)) active = d.active;
+    else report.dropped += 1;
+  }
+
+  // Added in data version 2. Version-1 data has none of these, which is fine.
+  const bodyweights = keep(d.bodyweights, (b) => b && isDay(b.date) && toNum(b.w) > 0)
     .map((b) => ({ id: String(b.id || uid()), date: b.date, w: toNum(b.w) }))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const foods = (Array.isArray(d.foods) ? d.foods : [])
-    .filter((x) => x && x.name)
+  const foods = keep(d.foods, (x) => x && x.name)
     .map((x) => ({
       id: String(x.id || `c-${uid()}`), name: String(x.name), serving: String(x.serving || '1 serving'),
       kcal: toNum(x.kcal) || 0, p: toNum(x.p) || 0, c: toNum(x.c) || 0, f: toNum(x.f) || 0, custom: true,
     }));
-  const foodLog = (Array.isArray(d.foodLog) ? d.foodLog : [])
-    .filter((x) => x && isDay(x.date) && x.name)
+  const foodLog = keep(d.foodLog, (x) => x && isDay(x.date) && x.name)
     .map((x) => ({
       id: String(x.id || uid()), date: x.date, foodId: x.foodId ? String(x.foodId) : null,
       name: String(x.name), serving: String(x.serving || ''), qty: toNum(x.qty) || 1,
@@ -243,7 +260,7 @@ function migrate(d) {
     settings: { ...base.settings, ...(d.settings && typeof d.settings === 'object' ? d.settings : {}) },
     program: program.length ? program : base.program,
     sessions,
-    active: d.active && Array.isArray(d.active.entries) ? d.active : null,
+    active,
     bodyweights,
     foods,
     foodLog,
@@ -257,7 +274,39 @@ function clampSets(v) {
   return Number.isFinite(n) ? Math.min(10, Math.max(1, n)) : 3;
 }
 
+/* ------------------------------------------------------------------ */
+/* Loading, saving, and protecting saved data                          */
+/* ------------------------------------------------------------------ */
+
 let startupNotice = '';
+
+// Recovery mode: set when saved data exists but can't be used safely AND we couldn't
+// keep a copy of it. While it is set, save() refuses to write, so nothing is overwritten.
+// { reason: 'unreadable' | 'newer' | 'skipped', raw: the untouched saved text }
+let recovery = null;
+
+// Safety copies live next to the main data as gymlog.v1.<reason>.<timestamp>.
+// The app never deletes them on its own; the owner can download or delete them in Backup.
+const SAFETY_PREFIX = `${STORAGE_KEY}.`;
+function keepSafetyCopy(reason, raw) {
+  try {
+    localStorage.setItem(`${SAFETY_PREFIX}${reason}.${Date.now()}`, raw);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+function listSafetyCopies() {
+  const out = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const m = k && k.startsWith(SAFETY_PREFIX) && k.slice(SAFETY_PREFIX.length).match(/^([a-z-]+)\.(\d+)$/);
+      if (m) out.push({ key: k, reason: m[1], at: Number(m[2]) });
+    }
+  } catch (_) { /* storage blocked */ }
+  return out.sort((a, b) => b.at - a.at);
+}
 
 function load() {
   let raw = null;
@@ -268,21 +317,57 @@ function load() {
     return defaultData();
   }
   if (!raw) return defaultData();
-  try {
-    return migrate(JSON.parse(raw));
-  } catch (e) {
-    // Never overwrite data we could not read. Park it under its own key and start fresh.
-    try { localStorage.setItem(`${STORAGE_KEY}.unreadable.${Date.now()}`, raw); } catch (_) { /* full */ }
-    startupNotice = 'Saved data could not be read, so it was set aside untouched. Import your latest backup from More > Backup and settings.';
+
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (_) { parsed = undefined; }
+
+  const report = { dropped: 0 };
+  let data = null;
+  let problem = parsed === undefined ? 'unreadable' : null;
+  if (!problem) {
+    try {
+      data = migrate(parsed, report);
+    } catch (e) {
+      problem = e.code === 'newer' ? 'newer' : 'unreadable';
+    }
+  }
+
+  if (problem === 'newer') {
+    // A newer app version wrote this. Never downgrade it: block saving and ask for a reload.
+    recovery = { reason: 'newer', raw };
     return defaultData();
   }
+  if (problem === 'unreadable') {
+    if (keepSafetyCopy('unreadable', raw)) {
+      startupNotice = 'Saved data could not be read, so an untouched copy was kept. Download it from More > Backup and settings, or restore your latest backup there.';
+      return defaultData();
+    }
+    recovery = { reason: 'unreadable', raw };
+    return defaultData();
+  }
+  if (report.dropped > 0) {
+    // Most of it loaded, but some records couldn't be read. Keep the original before anything is saved over it.
+    if (!keepSafetyCopy('skipped', raw)) {
+      recovery = { reason: 'skipped', raw, partial: data, dropped: report.dropped };
+      return defaultData();
+    }
+    startupNotice = `${report.dropped} saved record${report.dropped === 1 ? '' : 's'} couldn't be read and ${report.dropped === 1 ? 'was' : 'were'} left out. An untouched copy of everything was kept in More > Backup and settings.`;
+  }
+  return data;
 }
 
+// Returns true only if the data really reached storage.
 function save() {
+  if (recovery) {
+    toast('Not saved: your earlier data needs recovering first. See the notice on the Today tab.');
+    return false;
+  }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    return true;
   } catch (e) {
-    toast('Could not save. Export a backup from More > Backup and settings now.');
+    toast('Could not save. Phone storage may be full. Download a backup from More > Backup and settings now.');
+    return false;
   }
 }
 
@@ -470,7 +555,13 @@ function finishWorkout() {
     entries,
   });
   db.active = null;
-  save();
+  if (!save()) {
+    // Storage refused the write: put everything back so the workout stays open and nothing is lost.
+    db.sessions.pop();
+    db.active = a;
+    render();
+    return;
+  }
   stopRest();
   releaseWake();
   render();
@@ -593,11 +684,12 @@ function saveWeight() {
   const date = $('#bw-date').value || localDate();
   if (!(w > 0 && w < 500)) { toast('Enter your weight first.'); $('#bw-w').focus(); return; }
   if (!isDay(date) || date > localDate()) { toast('Pick today or an earlier date.'); return; }
+  const before = db.bodyweights.map((b) => ({ ...b }));
   const existing = db.bodyweights.find((b) => b.date === date);
   if (existing) existing.w = w;
   else db.bodyweights.push({ id: uid(), date, w });
   db.bodyweights.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  save();
+  if (!save()) { db.bodyweights = before; return; }
   render();
   toast(existing ? `Updated ${dayLabel(date).toLowerCase()}'s weight.` : 'Weight saved.');
 }
@@ -631,7 +723,8 @@ function logFood(foodId, date, qty) {
   if (!f || !(qty > 0)) return;
   // Copy the numbers so later edits to a food never change past days.
   db.foodLog.push({ id: uid(), date, foodId: f.id, name: f.name, serving: f.serving, qty, kcal: f.kcal, p: f.p, c: f.c, f: f.f });
-  save();
+  if (!save()) { db.foodLog.pop(); return false; }
+  return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -656,10 +749,20 @@ function downloadFile(file) {
 }
 
 function markBackedUp(msg) {
+  const before = db.lastBackupAt;
   db.lastBackupAt = new Date().toISOString();
-  save();
+  if (!save()) { db.lastBackupAt = before; return; }
   render();
   toast(msg);
+}
+
+// Starting a download doesn't prove the file landed on the phone, so ask before
+// counting it as a backup (the overdue-backup reminder depends on this date).
+function confirmDownloaded(file) {
+  setTimeout(() => {
+    if (confirm(`Check your Downloads for ${file.name}. Is it there?`)) markBackedUp('Backup recorded.');
+    else toast("Not counted as a backup. Try 'Send backup to Drive or a chat' instead.");
+  }, 1200);
 }
 
 const canShareFiles = () => {
@@ -670,36 +773,65 @@ const canShareFiles = () => {
 function exportBackup(mode) {
   const file = backupFile();
   if (mode === 'share' && canShareFiles()) {
+    // share() only resolves after the user picked where it went, so that counts as done.
     navigator.share({ files: [file], title: 'Gym Log backup' })
       .then(() => markBackedUp('Backup sent.'))
-      .catch((err) => { if (err && err.name !== 'AbortError') { downloadFile(file); markBackedUp('Backup downloaded.'); } });
+      .catch((err) => { if (err && err.name !== 'AbortError') { downloadFile(file); confirmDownloaded(file); } });
     return;
   }
   downloadFile(file);
-  markBackedUp('Backup downloaded.');
+  confirmDownloaded(file);
 }
 
 function importBackup(file) {
   const reader = new FileReader();
+  reader.onerror = () => toast("Couldn't read that file. Nothing was changed.");
   reader.onload = () => {
     let data;
+    const report = { dropped: 0 };
     try {
-      data = migrate(JSON.parse(reader.result));
-    } catch (_) {
-      toast("That file isn't a Gym Log backup.");
+      data = migrate(JSON.parse(reader.result), report);
+    } catch (e) {
+      toast(e && e.code === 'newer'
+        ? 'That backup is from a newer version of the app. Reload the app to update it, then try again. Nothing was changed.'
+        : "That file isn't a Gym Log backup. Nothing was changed.");
       return;
     }
+    if (report.dropped > 0 && !confirm(`${report.dropped} record${report.dropped === 1 ? '' : 's'} in this backup can't be read and would be left out. Import the rest anyway?`)) return;
     const n = data.sessions.length;
-    if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}.`)) return;
-    // Keep the data being replaced, just in case.
-    try { localStorage.setItem(`${STORAGE_KEY}.before-import`, JSON.stringify(db)); } catch (_) { /* full */ }
+    if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'} and ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'}.`)) return;
+
+    // Keep an untouched copy of what is being replaced. No copy, no import.
+    let current = null;
+    if (recovery) current = recovery.raw;
+    else {
+      try { current = localStorage.getItem(STORAGE_KEY); } catch (_) { current = null; }
+    }
+    if (current && !keepSafetyCopy('before-import', current)) {
+      toast("Couldn't keep a safety copy of your current data, so nothing was imported. Download a backup and free up space first.");
+      return;
+    }
+
+    const previous = db;
+    const previousRecovery = recovery;
     db = data;
+    recovery = null; // the old data is now safely copied, so saving may resume
+    if (!save()) {
+      db = previous;
+      recovery = previousRecovery;
+      render();
+      return;
+    }
     stopRest();
-    save();
+    startupNotice = '';
     render();
-    toast('Backup restored.');
+    toast('Backup restored. Your previous data was kept as a safety copy.');
   };
   reader.readAsText(file);
+}
+
+function downloadText(name, text) {
+  downloadFile(new File([text], name, { type: 'application/json' }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -748,8 +880,31 @@ function foodItemHtml(f) {
     </button>`;
 }
 
+function recoveryHtml() {
+  if (!recovery) return '';
+  const download = '<button type="button" class="btn small primary" data-action="recovery-download">Download saved data</button>';
+  if (recovery.reason === 'newer') {
+    return `
+      <div class="notice warn">
+        <p><strong>Saving is paused.</strong><br><span class="small">Your data was saved by a newer version of this app. Reload to get that version. Until then nothing is saved, so your data can't be overwritten.</span></p>
+        <div class="row wrap">${download}<button type="button" class="btn small" data-action="recovery-reload">Reload app</button></div>
+      </div>`;
+  }
+  const what = recovery.reason === 'skipped'
+    ? `${recovery.dropped} saved record${recovery.dropped === 1 ? '' : 's'} couldn't be read`
+    : "Your saved data couldn't be read";
+  const next = recovery.reason === 'skipped'
+    ? '<button type="button" class="btn small" data-action="recovery-keep">Keep what loaded</button>'
+    : '<button type="button" class="btn small" data-action="recovery-fresh">Start fresh</button>';
+  return `
+    <div class="notice warn">
+      <p><strong>Saving is paused.</strong><br><span class="small">${what}, and there's no room on the phone to keep a safety copy. Nothing will be saved until you choose, so your data can't be overwritten. Download it first, then restore a backup from More > Backup and settings, or continue below.</span></p>
+      <div class="row wrap">${download}${next}</div>
+    </div>`;
+}
+
 function noticesHtml() {
-  const out = [];
+  const out = [recoveryHtml()];
   if (startupNotice) out.push(`<div class="notice warn">${esc(startupNotice)}</div>`);
 
   if (!isStandalone() && !db.installTipDismissed) {
@@ -1168,6 +1323,8 @@ function viewData() {
       </div>
     </section>
 
+    ${safetyCopiesHtml()}
+
     <section class="card" style="margin-top:14px">
       <h3>Settings</h3>
       <div class="stack" style="margin-top:10px">
@@ -1189,6 +1346,28 @@ function viewData() {
       <button type="button" class="btn danger block" data-action="erase">Erase all data</button>
     </section>
     <p class="muted small" style="text-align:center;margin-top:18px">Gym Log ${APP_VERSION}</p>`;
+}
+
+const COPY_LABELS = {
+  'before-import': 'Before a restore',
+  unreadable: "Data that couldn't be read",
+  skipped: 'Before unreadable records were left out',
+};
+
+function safetyCopiesHtml() {
+  const copies = listSafetyCopies();
+  if (!copies.length) return '';
+  return `
+    <section class="card" style="margin-top:14px">
+      <h3>Safety copies</h3>
+      <p class="muted small" style="margin-top:4px">Untouched copies the app kept before replacing or skipping data. They stay until you delete them.</p>
+      ${copies.map((c) => `
+        <div class="row-item">
+          <span class="grow"><span class="li-title">${esc(COPY_LABELS[c.reason] || c.reason)}</span><span class="muted small">${esc(dateLabel(c.at))}, ${esc(timeLabel(c.at))}</span></span>
+          <button type="button" class="btn small" data-action="copy-download" data-key="${esc(c.key)}">Download</button>
+          <button type="button" class="icon-btn" data-action="copy-delete" data-key="${esc(c.key)}" aria-label="Delete this safety copy">✕</button>
+        </div>`).join('')}
+    </section>`;
 }
 
 function viewMore() {
@@ -1514,7 +1693,7 @@ const actions = {
   },
   'food-log': () => {
     const f = getFood(sheet.foodId);
-    logFood(sheet.foodId, sheet.date, sheet.qty);
+    if (!logFood(sheet.foodId, sheet.date, sheet.qty)) return; // sheet stays open; save() explained why
     closeSheet(); render();
     if (f) toast(`Added ${f.name}.`);
   },
@@ -1533,7 +1712,7 @@ const actions = {
       kcal, p: toNum($('#nf-p').value) || 0, c: toNum($('#nf-c').value) || 0, f: toNum($('#nf-f').value) || 0, custom: true,
     };
     db.foods.unshift(food);
-    save();
+    if (!save()) { db.foods.shift(); return; }
     openSheet({ kind: 'amount', foodId: food.id, date: sheet.date, qty: 1 });
     toast('Food saved. It shows up in search from now on.');
   },
@@ -1602,6 +1781,40 @@ const actions = {
   },
   'dismiss-install': () => { db.installTipDismissed = true; save(); render(); },
   'sheet-close': () => closeSheet(),
+
+  // Recovery and safety copies
+  'recovery-download': () => {
+    if (recovery) downloadText(`gym-log-saved-data-${localDate()}.json`, recovery.raw);
+  },
+  'recovery-reload': () => location.reload(),
+  'recovery-fresh': () => {
+    if (!confirm('Start fresh? This replaces the unreadable data on this phone for good. Download it first if you might need it.')) return;
+    recovery = null;
+    db = defaultData();
+    if (save()) { render(); toast('Started fresh.'); }
+  },
+  'recovery-keep': () => {
+    if (!recovery || !recovery.partial) return;
+    if (!confirm(`Continue with what loaded? The ${recovery.dropped} unreadable record${recovery.dropped === 1 ? '' : 's'} will be gone for good. Download the saved data first if you might need it.`)) return;
+    const r = recovery;
+    recovery = null;
+    db = r.partial;
+    if (!save()) { recovery = r; db = defaultData(); return; }
+    render();
+    toast('Continuing with the data that loaded.');
+  },
+  'copy-download': (el) => {
+    let text = null;
+    try { text = localStorage.getItem(el.dataset.key); } catch (_) { text = null; }
+    if (!text) { toast('That copy is no longer there.'); render(); return; }
+    const stamp = el.dataset.key.slice(SAFETY_PREFIX.length).replace(/\./g, '-');
+    downloadText(`gym-log-${stamp}.json`, text);
+  },
+  'copy-delete': (el) => {
+    if (!confirm('Delete this safety copy for good? Download it first if you might need it.')) return;
+    try { localStorage.removeItem(el.dataset.key); } catch (_) { /* ignore */ }
+    render();
+  },
 };
 
 document.addEventListener('click', (e) => {

@@ -906,9 +906,13 @@ function recoveryHtml() {
     </div>`;
 }
 
+// Data-safety warnings. Shown on Today whether or not a workout is in progress.
+function warningsHtml() {
+  return recoveryHtml() + (startupNotice ? `<div class="notice warn">${esc(startupNotice)}</div>` : '');
+}
+
 function noticesHtml() {
-  const out = [recoveryHtml()];
-  if (startupNotice) out.push(`<div class="notice warn">${esc(startupNotice)}</div>`);
+  const out = [warningsHtml()];
 
   if (!isStandalone() && !db.installTipDismissed) {
     const how = isIOS()
@@ -1032,7 +1036,7 @@ function viewWorkout() {
   const done = a.entries.reduce((n, e) => n + e.sets.filter((s) => s.done).length, 0);
   const total = a.entries.reduce((n, e) => n + e.sets.length, 0);
 
-  return `
+  return `${warningsHtml()}
     <div class="wo-head" style="${style}">
       <span class="disc" aria-hidden="true">${esc(a.label)}</span>
       <div class="grow">

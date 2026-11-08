@@ -23,14 +23,18 @@
 
   <div id="timer" class="timer" hidden aria-live="polite"></div>
   <div id="toast" class="toast" hidden role="status"></div>
+  <dialog id="sheet" class="sheet" aria-label="Details"><div id="sheet-body"></div></dialog>
 
   <nav class="tabs" aria-label="Sections">
     <button type="button" data-tab="today">Today</button>
+    <button type="button" data-tab="exercises">Exercises</button>
+    <button type="button" data-tab="body">Body</button>
     <button type="button" data-tab="history">History</button>
-    <button type="button" data-tab="program">Program</button>
-    <button type="button" data-tab="data">Backup</button>
+    <button type="button" data-tab="more">More</button>
   </nav>
 
+  <script src="data/exercises.js"></script>
+  <script src="data/foods.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

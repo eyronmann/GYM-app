@@ -6,12 +6,14 @@
   RULE: if you add, rename or remove a file the app needs, update APP_FILES
   and bump CACHE_NAME (gymlog-v2, gymlog-v3, ...).
 */
-const CACHE_NAME = 'gymlog-v1';
+const CACHE_NAME = 'gymlog-v2';
 const APP_FILES = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './data/exercises.js',
+  './data/foods.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',

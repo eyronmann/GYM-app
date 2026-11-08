@@ -78,6 +78,22 @@ More (program, backup and settings).
 - Food log entries copy the food's numbers so editing or deleting a food never
   changes past days.
 
+## Protecting saved data (how the code does rule 4)
+
+- `save()` returns `true` only when storage accepted the write. Anything that
+  tells the user "saved" (finish workout, weigh-in, food, restore) checks it and
+  rolls back on `false`.
+- Safety copies are kept as `gymlog.v1.<reason>.<timestamp>` with reason
+  `unreadable`, `skipped` (some records couldn't be read) or `before-import`.
+  The app never deletes them; the owner downloads or deletes them in
+  More > Backup and settings.
+- Recovery mode: if saved data can't be used (unreadable, or written by a newer
+  app version) and no safety copy fits, `save()` refuses to write until the
+  owner downloads the data and chooses what to do. Newer-version data always
+  pauses saving; the fix is reloading to get the newer app.
+- `migrate()` rejects data with an unknown or newer `version`, and counts every
+  record it can't read in `report.dropped`; callers keep a copy or ask first.
+
 ## Built-in data accuracy
 
 - `data/exercises.js` is limited to the owner's gym equipment: dumbbells, cable

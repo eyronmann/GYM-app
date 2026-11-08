@@ -16,7 +16,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 2;
-const APP_VERSION = '2.0.3';
+const APP_VERSION = '2.0.4';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -378,6 +378,10 @@ const NOTE_KEY = 'gymlog.note'; // sessionStorage: a message to show after a rel
 // For 'read-failed' the browser wouldn't hand over the saved data at all, so raw is null.
 let recovery = null;
 
+// The exact text this window last read from or wrote to storage. save() compares against
+// it to notice that another window has written since (see the stale-write check there).
+let lastSeenRaw = null;
+
 // Safety copies live next to the main data as gymlog.v1.<reason>.<timestamp>.
 // The app never deletes them on its own; the owner can download or delete them in Backup.
 const SAFETY_PREFIX = `${STORAGE_KEY}.`;
@@ -405,6 +409,7 @@ function load() {
   let raw = null;
   try {
     raw = localStorage.getItem(STORAGE_KEY);
+    lastSeenRaw = raw;
   } catch (e) {
     // We can't see what is saved, so we can't know it's safe to write. Pause saving until a reload can read it.
     recovery = { reason: 'read-failed', raw: null };
@@ -460,8 +465,28 @@ function save() {
     toast('Not saved: your earlier data needs recovering first. See the notice on the Today tab.');
     return false;
   }
+  // Stale-write check: if what's stored isn't what this window last read or wrote, another
+  // window has saved in the meantime (and its storage event hasn't reached us yet).
+  // Writing now would put this window's older copy over that save, so don't.
+  let current;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    current = localStorage.getItem(STORAGE_KEY);
+  } catch (e) {
+    unsaved = true;
+    toast("Not saved: the app couldn't check your saved data first. Reload the app.");
+    return false;
+  }
+  if (current !== lastSeenRaw) {
+    handleOtherWindowSave(JSON.stringify(db));
+    return false;
+  }
+  // Note: reading and then writing are two steps, and browsers give pages no lock around
+  // localStorage. Another window could still write in the instant between them. This check
+  // closes the realistic case (a window acting on an old copy), not that last instant.
+  const raw = JSON.stringify(db);
+  try {
+    localStorage.setItem(STORAGE_KEY, raw);
+    lastSeenRaw = raw;
     unsaved = false;
     return true;
   } catch (e) {
@@ -469,6 +494,23 @@ function save() {
     toast('Could not save. Phone storage may be full. Download a backup from More > Backup and settings now.');
     return false;
   }
+}
+
+// Another window saved first. Keep this window's version (including the change it was
+// about to save) as a safety copy, then reload so the startup checks run on what's stored.
+// If there's no room for the copy, don't reload: pause saving and offer it as a download.
+function handleOtherWindowSave(mine) {
+  unsaved = true;
+  if (keepSafetyCopy('other-window', mine)) {
+    try {
+      sessionStorage.setItem(NOTE_KEY, "Another window saved your data first, so this window didn't save over it. What this window had was kept as a safety copy in More > Backup and settings.");
+    } catch (_) { /* no note, still safe */ }
+    location.reload();
+    return;
+  }
+  recovery = { reason: 'conflict', raw: mine };
+  closeSheet();
+  render();
 }
 
 // How a tap changes saved data: snapshot, change, save, and undo the change if storage
@@ -954,7 +996,13 @@ function importBackup(file) {
     let current = null;
     if (recovery) current = recovery.raw;
     else {
-      try { current = localStorage.getItem(STORAGE_KEY); } catch (_) { current = null; }
+      try {
+        current = localStorage.getItem(STORAGE_KEY);
+      } catch (_) {
+        // A failed read is not an empty phone. Without the current data we can't keep a copy of it.
+        toast("Couldn't read your current data, so it can't be protected. Nothing was restored. Reload the app and try again.");
+        return;
+      }
     }
     if (current && !keepSafetyCopy('before-import', current)) {
       toast("Couldn't keep a safety copy of your current data, so nothing was imported. Download a backup and free up space first.");
@@ -1033,6 +1081,13 @@ function recoveryHtml() {
   if (!recovery) return '';
   const download = '<button type="button" class="btn small primary" data-action="recovery-download">Download saved data</button>';
   const reload = '<button type="button" class="btn small" data-action="recovery-reload">Reload app</button>';
+  if (recovery.reason === 'conflict') {
+    return `
+      <div class="notice warn">
+        <p><strong>Saving is paused.</strong><br><span class="small">Another window saved your data first, so this window didn't save over it, and there's no room on the phone to keep this window's copy. Download it, then reload to see the saved data.</span></p>
+        <div class="row wrap">${download}${reload}</div>
+      </div>`;
+  }
   if (recovery.reason === 'read-failed') {
     return `
       <div class="notice warn">
@@ -2136,11 +2191,13 @@ window.addEventListener('beforeinstallprompt', (e) => {
 window.addEventListener('storage', (e) => {
   if (e.key !== STORAGE_KEY) return; // safety copies and other keys don't matter here
 
-  // Saved data that only this window holds (unreadable or partly unreadable, no copy yet).
-  if (recovery && recovery.raw && (recovery.reason === 'unreadable' || recovery.reason === 'skipped')
-      && !keepSafetyCopy(recovery.reason, recovery.raw)) {
+  // Data that only this window holds: unreadable or partly unreadable saved data with no
+  // copy yet, or this window's version from an earlier conflict that had no room for a copy.
+  const memoryOnly = { unreadable: 'unreadable', skipped: 'skipped', conflict: 'other-window' };
+  if (recovery && recovery.raw && memoryOnly[recovery.reason]
+      && !keepSafetyCopy(memoryOnly[recovery.reason], recovery.raw)) {
     // No room to keep it, and reloading would lose it. Stay put so it can still be downloaded.
-    startupNotice = 'Another window changed your data. Download the saved data below before you reload, or it will be lost.';
+    startupNotice = 'Another window changed your data. Download the data below before you reload, or it will be lost.';
     closeSheet();
     render();
     return;
@@ -2149,9 +2206,15 @@ window.addEventListener('storage', (e) => {
   let note = 'Reloaded because your data was changed in another window.';
   // Changes here that storage refused, or data the other window just cleared: keep them too.
   if (unsaved || e.newValue === null) {
-    note = keepSafetyCopy('other-window', JSON.stringify(db))
-      ? 'Reloaded because your data was changed in another window. What this window had was kept as a safety copy in More > Backup and settings.'
-      : "Reloaded because your data was changed in another window. Changes this window couldn't save were lost.";
+    const mine = JSON.stringify(db);
+    if (!keepSafetyCopy('other-window', mine)) {
+      // No room for a copy: don't reload and lose it. Pause saving and offer it as a download.
+      recovery = { reason: 'conflict', raw: mine };
+      closeSheet();
+      render();
+      return;
+    }
+    note = 'Reloaded because your data was changed in another window. What this window had was kept as a safety copy in More > Backup and settings.';
   }
   try { sessionStorage.setItem(NOTE_KEY, note); } catch (_) { /* no note, still safe */ }
   location.reload();

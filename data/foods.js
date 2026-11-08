@@ -2,6 +2,8 @@
   Built-in foods. Values are PER SERVING: kcal, p = protein (g), c = carbs (g), f = fat (g).
 
   Generic foods use typical USDA FoodData Central values.
+  Kamote and saba use the Philippine Food Composition Tables (FNRI PhilFCT),
+  because local varieties differ a lot from US ones.
   Entries with est: true are estimates: Filipino dishes vary a lot by recipe,
   and branded items (instant noodles, 3-in-1 coffee, whey) vary by brand.
   The app tells the user so and suggests creating their own food from the label.
@@ -24,8 +26,8 @@ window.FOODS = [
   { id: 'pasta', name: 'Spaghetti or pasta, cooked', serving: '1 cup (140 g)', kcal: 221, p: 8.1, c: 43.2, f: 1.3, tags: 'noodles' },
   { id: 'pancit-canton', name: 'Instant pancit canton', serving: '1 pack (60 g)', kcal: 290, p: 6, c: 39, f: 12, tags: 'noodles instant', est: true },
   { id: 'pancit-bihon', name: 'Pancit bihon', serving: '1 cup (150 g)', kcal: 220, p: 9, c: 33, f: 6, tags: 'noodles', est: true },
-  { id: 'kamote', name: 'Sweet potato (kamote), boiled', serving: '1 medium (150 g)', kcal: 114, p: 2.1, c: 26.6, f: 0.2, tags: 'camote' },
-  { id: 'potato', name: 'Potato, boiled', serving: '1 medium (170 g)', kcal: 148, p: 3.2, c: 34.2, f: 0.2, tags: 'patatas' },
+  { id: 'kamote', name: 'Kamote (white sweet potato), boiled', serving: '150 g', kcal: 189, p: 0.6, c: 44, f: 1.2, tags: 'camote sweet potato' }, // FNRI PhilFCT B012: 126 kcal/100 g
+  { id: 'potato', name: 'Potato, boiled', serving: '1 medium (170 g)', kcal: 146, p: 2.9, c: 34, f: 0.2, tags: 'patatas' }, // USDA SR: 86 kcal/100 g (FNRI B008 lists 63)
   { id: 'corn', name: 'Sweet corn, boiled', serving: '1 ear (100 g kernels)', kcal: 96, p: 3.4, c: 21, f: 1.5, tags: 'mais' },
 
   // Eggs, meat, fish, protein
@@ -69,8 +71,8 @@ window.FOODS = [
   { id: 'avocado', name: 'Avocado', serving: '1/2 fruit (100 g)', kcal: 160, p: 2, c: 8.5, f: 14.7 },
 
   // Fruit and vegetables
-  { id: 'banana', name: 'Banana (lakatan)', serving: '1 medium (118 g)', kcal: 105, p: 1.3, c: 27, f: 0.4, tags: 'saging' },
-  { id: 'saba', name: 'Saba banana, boiled', serving: '1 piece (100 g)', kcal: 110, p: 1.2, c: 28, f: 0.3, tags: 'saging nilagang', est: true },
+  { id: 'banana', name: 'Banana', serving: '1 medium (118 g)', kcal: 105, p: 1.3, c: 27, f: 0.4, tags: 'saging' }, // USDA raw banana, not lakatan-specific
+  { id: 'saba', name: 'Saba banana, boiled', serving: '1 piece (65 g)', kcal: 103, p: 0.8, c: 25.1, f: 0, tags: 'saging nilagang' }, // FNRI PhilFCT E015: 159 kcal/100 g
   { id: 'mango', name: 'Ripe mango', serving: '1 cup sliced (165 g)', kcal: 99, p: 1.4, c: 24.7, f: 0.6, tags: 'mangga' },
   { id: 'apple', name: 'Apple', serving: '1 medium (182 g)', kcal: 95, p: 0.5, c: 25.1, f: 0.3, tags: 'mansanas' },
   { id: 'papaya', name: 'Papaya', serving: '1 cup (145 g)', kcal: 62, p: 0.7, c: 15.7, f: 0.4 },

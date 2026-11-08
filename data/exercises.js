@@ -14,7 +14,7 @@ window.EXERCISES = [
     id: 'hack-squat', name: 'Hack Squat', cat: 'Legs', equip: 'Hack squat machine',
     cues: [
       'Feet shoulder-width apart in the middle of the platform.',
-      'Lower until your thighs are at least parallel to the platform.',
+      'Lower until your thighs are about parallel to the floor, or as deep as you can while your lower back stays on the pad.',
       'Push through your whole foot and stop just short of locking your knees.',
     ],
     alts: ['leg-press', 'goblet-squat', 'bulgarian-split-squat'],
@@ -192,7 +192,7 @@ window.EXERCISES = [
       'Lean back slightly and pull the handle to your lower chest.',
       'Control it back up to a full stretch.',
     ],
-    alts: ['lat-pulldown', 'seated-cable-row', 'straight-arm-pulldown'],
+    alts: ['lat-pulldown', 'straight-arm-pulldown', 'dumbbell-pullover'],
   },
   {
     id: 't-bar-row', name: 'T-Bar Row', cat: 'Back', equip: 'T-bar row',
@@ -228,7 +228,7 @@ window.EXERCISES = [
       'Pull the handle to your stomach, chest up, elbows close.',
       'Let your shoulder blades slide forward on the way back for a full stretch.',
     ],
-    alts: ['t-bar-row', 'one-arm-dumbbell-row', 'close-grip-pulldown'],
+    alts: ['t-bar-row', 'one-arm-dumbbell-row', 'barbell-row'],
   },
   {
     id: 'straight-arm-pulldown', name: 'Cable Straight-Arm Pulldown', cat: 'Back', equip: 'Cable machine, high pulley',
@@ -455,10 +455,11 @@ window.EXERCISES = [
   {
     id: 'cable-woodchop', name: 'Cable Woodchop', cat: 'Core', equip: 'Cable machine',
     cues: [
-      'Stand side-on to the cable with your feet wide.',
-      'Rotate through your torso, pulling the handle diagonally across your body.',
-      'Keep your arms nearly straight. The turn comes from your trunk.',
+      'Stand side-on to the cable with your feet wide and knees soft.',
+      'Turn through your hips and upper back and let your back foot pivot. Keep your lower back braced; it should not twist on its own.',
+      'Keep your arms nearly straight and move under control, not with momentum.',
     ],
-    alts: ['cable-crunch', 'plank'],
+    // No other rotational exercise in the library, so no direct swap is offered.
+    alts: [],
   },
 ];

@@ -108,9 +108,9 @@ p { margin: 0 0 12px; }
 .btn.plate { background: var(--plate, var(--chalk)); color: var(--plate-ink, var(--floor)); border-color: transparent; font-size: 1.1rem; min-height: 56px; }
 .btn.ghost { background: transparent; }
 .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: transparent; }
-.btn.small { min-height: 38px; padding: 0 12px; font-size: .9rem; border-radius: 10px; }
+.btn.small { min-height: 44px; padding: 0 12px; font-size: .9rem; border-radius: 10px; }
 .icon-btn {
-  width: 40px; height: 40px; flex: none;
+  width: 44px; height: 44px; flex: none;
   display: inline-grid; place-items: center;
   background: transparent; border: 1px solid var(--line); border-radius: 10px;
   color: var(--dust); font-size: 1rem; line-height: 1;
@@ -220,14 +220,14 @@ tr.done .tick { background: var(--chalk); border-color: var(--chalk); color: var
 .timer .t { font-size: 1.9rem; font-weight: 800; font-variant-numeric: tabular-nums; min-width: 4.2ch; }
 .timer .what { flex: 1; font-size: .9rem; font-weight: 600; }
 .timer button {
-  min-height: 42px; padding: 0 12px; border-radius: 10px;
+  min-height: 44px; padding: 0 12px; border-radius: 10px;
   border: 1px solid rgba(0, 0, 0, .2); background: transparent; color: var(--floor); font-weight: 700;
 }
 .timer.over { background: var(--plate-yellow); }
 
 /* ---------- History ---------- */
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; background: var(--mat); border-radius: 12px; margin-bottom: 14px; }
-.seg button { min-height: 40px; border: 0; border-radius: 9px; background: transparent; color: var(--dust); font-weight: 650; }
+.seg button { min-height: 44px; border: 0; border-radius: 9px; background: transparent; color: var(--dust); font-weight: 650; }
 .seg button[aria-pressed="true"] { background: var(--mat-2); color: var(--chalk); }
 
 details.card > summary { list-style: none; cursor: pointer; }
@@ -238,17 +238,18 @@ details.card[open] > summary { margin-bottom: 10px; }
 .sess-lines .sets-line { font-variant-numeric: tabular-nums; font-weight: 650; }
 
 /* ---------- Program editor ---------- */
+/* Name on its own line; sets x reps below; the buttons sit beside them when there's room
+   and wrap to their own right-aligned line when there isn't (no sideways overflow at 390 px). */
 .prog-ex {
-  display: grid;
-  grid-template-columns: 52px auto 76px auto 1fr;
-  gap: 6px; align-items: center;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding: 10px 0; border-top: 1px solid var(--line);
 }
-.prog-ex .name { grid-column: 1 / -1; }
+.prog-ex .name { flex: 1 1 100%; }
 .prog-ex .x { color: var(--dust); padding: 0 2px; }
-.prog-ex .tools { display: flex; gap: 6px; justify-content: flex-end; }
-.prog-ex input { min-height: 42px; }
-.prog-ex input.n { text-align: center; padding: 8px 4px; }
+.prog-ex .tools { display: flex; gap: 6px; margin-left: auto; }
+.prog-ex input { min-height: 44px; }
+.prog-ex input.n { flex: none; width: 56px; text-align: center; padding: 8px 4px; }
+.prog-ex input.n[data-prog="ereps"] { width: 80px; }
 
 /* ---------- toast ---------- */
 .toast {
@@ -276,6 +277,7 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 
 /* Exercise name that opens its how-to sheet */
 .title-btn {
+  min-height: 44px; display: inline-flex; align-items: center; gap: 6px;
   background: none; border: 0; padding: 0; text-align: left;
   font-size: 1.05rem; font-weight: 700; line-height: 1.3; color: var(--chalk);
 }
@@ -293,7 +295,7 @@ input.search {
 }
 .chips::-webkit-scrollbar { display: none; }
 .chip-btn {
-  flex: none; min-height: 38px; padding: 0 14px; border-radius: 999px;
+  flex: none; min-height: 44px; padding: 0 14px; border-radius: 999px;
   border: 1px solid var(--line); background: transparent; color: var(--dust); font-weight: 650;
 }
 .chip-btn[aria-pressed="true"] { background: var(--chalk); color: var(--floor); border-color: var(--chalk); }

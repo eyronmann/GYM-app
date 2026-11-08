@@ -510,7 +510,9 @@ function swapEntry(entryId, newName) {
   const i = a.entries.findIndex((e) => e.id === entryId);
   if (i === -1) return;
   const e = a.entries[i];
-  if (keyOf(e.name) === keyOf(newName)) return;
+  if (keyOf(e.name) === keyOf(newName)) return false;
+  const typed = e.sets.filter((s) => !s.done && (s.w !== '' || s.r !== '')).length;
+  if (typed && !confirm(`${typed} unticked ${e.name} set${typed === 1 ? ' has' : 's have'} numbers typed in. Swapping clears ${typed === 1 ? 'it' : 'them'}. Your ticked sets stay. Swap anyway?`)) return false;
   const doneCount = e.sets.filter((s) => s.done).length;
   if (!doneCount) {
     e.name = newName;
@@ -523,6 +525,7 @@ function swapEntry(entryId, newName) {
     a.entries.splice(i + 1, 0, newEntry(newName, left, e.targetReps));
     toast(`Added ${newName}. Your ticked ${e.name} sets stay.`);
   }
+  return true;
 }
 
 function finishWorkout() {
@@ -1609,8 +1612,7 @@ function applyPick(name) {
     db.active.entries.push(newEntry(name, 3, ''));
     toast(`Added ${name}.`);
   } else if (s.purpose === 'swap') {
-    if (!db.active) return;
-    swapEntry(s.entryId, name);
+    if (!db.active || !swapEntry(s.entryId, name)) return;
   }
   save();
   closeSheet();
@@ -1631,7 +1633,8 @@ const actions = {
     const e = findEntry(el.dataset.entry);
     if (!e || e.sets.length <= 1) return;
     const lastSet = e.sets[e.sets.length - 1];
-    if (lastSet.done && !confirm('The last set is ticked. Remove it anyway?')) return;
+    const hasNumbers = lastSet.done || lastSet.w !== '' || lastSet.r !== '';
+    if (hasNumbers && !confirm(`Set ${e.sets.length} of ${e.name} has numbers in it. Remove it anyway?`)) return;
     e.sets.pop(); save(); render();
   },
   swap: (el) => openSheet({ kind: 'pick', purpose: 'swap', entryId: el.dataset.entry, q: '', cat: 'All' }),
@@ -1698,8 +1701,12 @@ const actions = {
     if (f) toast(`Added ${f.name}.`);
   },
   'food-remove': (el) => {
-    db.foodLog = db.foodLog.filter((x) => x.id !== el.dataset.id);
-    save(); render();
+    const x = db.foodLog.find((y) => y.id === el.dataset.id);
+    if (!x || !confirm(`Remove ${x.name} (${kcalText(x.kcal * x.qty)} kcal) from ${dayLabel(x.date).toLowerCase() === 'today' ? 'today' : dayLabel(x.date)}?`)) return;
+    const before = db.foodLog;
+    db.foodLog = db.foodLog.filter((y) => y.id !== x.id);
+    if (!save()) { db.foodLog = before; return; }
+    render();
   },
   'food-new': () => openSheet({ kind: 'newfood', date: sheet ? sheet.date : foodDate, name: sheet && sheet.q ? sheet.q.trim() : '' }),
   'food-save-new': () => {

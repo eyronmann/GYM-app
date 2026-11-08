@@ -398,6 +398,25 @@ function save() {
   }
 }
 
+// How a tap changes saved data: snapshot, change, save, and undo the change if storage
+// refuses (or if the change backs out by returning false). Returns true only when saved.
+// Callers show success only after this returns true.
+// (Typing into a box is the one exception: the typed text stays on screen if a save fails,
+// and the failure toast says so. Undoing keystrokes would fight the user.)
+function commit(change) {
+  const before = JSON.stringify(db);
+  let ok = false;
+  try {
+    ok = change() !== false;
+  } catch (e) {
+    db = JSON.parse(before);
+    throw e;
+  }
+  if (ok && save()) return true;
+  db = JSON.parse(before);
+  return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
@@ -487,16 +506,18 @@ function newEntry(name, sets, reps) {
 function startWorkout(index) {
   const w = db.program[index];
   if (!w) return;
-  db.active = {
-    id: uid(),
-    workoutId: w.id,
-    label: letter(index),
-    name: w.name,
-    startedAt: new Date().toISOString(),
-    entries: w.exercises.map((e) => newEntry(e.name, e.sets, e.reps)),
-  };
-  save();
+  const ok = commit(() => {
+    db.active = {
+      id: uid(),
+      workoutId: w.id,
+      label: letter(index),
+      name: w.name,
+      startedAt: new Date().toISOString(),
+      entries: w.exercises.map((e) => newEntry(e.name, e.sets, e.reps)),
+    };
+  });
   render();
+  if (!ok) return;
   window.scrollTo(0, 0);
   keepAwake();
 }
@@ -506,36 +527,37 @@ function findEntry(entryId) {
 }
 
 function toggleSet(entryId, i) {
-  const entry = findEntry(entryId);
-  if (!entry || !entry.sets[i]) return;
-  const set = entry.sets[i];
-  if (set.done) {
-    set.done = false;
-    save();
-    render();
-    return;
-  }
-  const sug = suggestion(entry, i, lastFor(entry.key));
-  if (set.w === '') set.w = sug.w;
-  if (set.r === '') set.r = sug.r;
-  if (!(toNum(set.r) > 0)) {
+  let needReps = false;
+  let ticked = null;
+  const ok = commit(() => {
+    const entry = findEntry(entryId);
+    if (!entry || !entry.sets[i]) return false;
+    const set = entry.sets[i];
+    if (set.done) { set.done = false; return true; }
+    const sug = suggestion(entry, i, lastFor(entry.key));
+    if (set.w === '') set.w = sug.w;
+    if (set.r === '') set.r = sug.r;
+    if (!(toNum(set.r) > 0)) { needReps = true; return false; }
+    set.done = true;
+    ticked = entry.name;
+    return true;
+  });
+  render();
+  if (needReps) {
     toast('Enter the reps you did, then tick the set.');
     const input = document.querySelector(`input[data-entry="${entryId}"][data-set="${i}"][data-field="r"]`);
     if (input) input.focus();
-    return;
   }
-  set.done = true;
-  save();
-  render();
-  startRest(entry.name);
+  if (ok && ticked) startRest(ticked);
 }
 
-// Swap an exercise mid-workout (machine taken, etc.).
+// Swap an exercise mid-workout (machine taken, etc.). Call inside commit().
 // No sets ticked yet: replace it. Some ticked: keep those and add the new one right after.
+// Returns the message to show once saved, or false if nothing should change.
 function swapEntry(entryId, newName) {
   const a = db.active;
   const i = a.entries.findIndex((e) => e.id === entryId);
-  if (i === -1) return;
+  if (i === -1) return false;
   const e = a.entries[i];
   if (keyOf(e.name) === keyOf(newName)) return false;
   const typed = e.sets.filter((s) => !s.done && (s.w !== '' || s.r !== '')).length;
@@ -545,14 +567,12 @@ function swapEntry(entryId, newName) {
     e.name = newName;
     e.key = keyOf(newName);
     e.sets = e.sets.map(newSet);
-    toast(`Swapped to ${newName}.`);
-  } else {
-    const left = Math.max(1, e.sets.length - doneCount);
-    e.sets = e.sets.filter((s) => s.done);
-    a.entries.splice(i + 1, 0, newEntry(newName, left, e.targetReps));
-    toast(`Added ${newName}. Your ticked ${e.name} sets stay.`);
+    return `Swapped to ${newName}.`;
   }
-  return true;
+  const left = Math.max(1, e.sets.length - doneCount);
+  e.sets = e.sets.filter((s) => s.done);
+  a.entries.splice(i + 1, 0, newEntry(newName, left, e.targetReps));
+  return `Added ${newName}. Your ticked ${e.name} sets stay.`;
 }
 
 function finishWorkout() {
@@ -601,8 +621,7 @@ function finishWorkout() {
 
 function discardWorkout(skipConfirm) {
   if (!skipConfirm && !confirm('Discard this workout? None of its sets will be saved.')) return;
-  db.active = null;
-  save();
+  if (!commit(() => { db.active = null; })) { render(); return; }
   stopRest();
   releaseWake();
   render();
@@ -1632,22 +1651,39 @@ function workoutById(id) { return db.program.find((w) => w.id === id); }
 function applyPick(name) {
   const s = sheet;
   if (!s || !name) return;
-  if (s.purpose === 'program') {
-    const w = workoutById(s.w);
-    if (!w) return;
-    if (w.exercises.some((x) => keyOf(x.name) === keyOf(name))) { toast(`${name} is already in ${w.name}.`); return; }
-    w.exercises.push(exercise(name, 3, '8-12'));
-    toast(`Added ${name} to ${w.name}.`);
-  } else if (s.purpose === 'workout-add') {
-    if (!db.active) return;
-    db.active.entries.push(newEntry(name, 3, ''));
-    toast(`Added ${name}.`);
-  } else if (s.purpose === 'swap') {
-    if (!db.active || !swapEntry(s.entryId, name)) return;
+  let msg = '';
+  let note = '';
+  const ok = commit(() => {
+    if (s.purpose === 'program') {
+      const w = workoutById(s.w);
+      if (!w) return false;
+      if (w.exercises.some((x) => keyOf(x.name) === keyOf(name))) { note = `${name} is already in ${w.name}.`; return false; }
+      w.exercises.push(exercise(name, 3, '8-12'));
+      msg = `Added ${name} to ${w.name}.`;
+      return true;
+    }
+    if (s.purpose === 'workout-add') {
+      if (!db.active) return false;
+      db.active.entries.push(newEntry(name, 3, ''));
+      msg = `Added ${name}.`;
+      return true;
+    }
+    if (s.purpose === 'swap') {
+      if (!db.active) return false;
+      msg = swapEntry(s.entryId, name);
+      return !!msg;
+    }
+    return false;
+  });
+  if (!ok) {
+    // Not saved: the picker stays open and the workout or program is exactly as before.
+    render();
+    if (note) toast(note);
+    return;
   }
-  save();
   closeSheet();
   render();
+  toast(msg);
 }
 
 const actions = {
@@ -1657,8 +1693,13 @@ const actions = {
   },
   tick: (el) => { unlockAudio(); toggleSet(el.dataset.entry, Number(el.dataset.set)); },
   'add-set': (el) => {
-    const e = findEntry(el.dataset.entry);
-    if (e) { e.sets.push(newSet()); save(); render(); }
+    commit(() => {
+      const e = findEntry(el.dataset.entry);
+      if (!e) return false;
+      e.sets.push(newSet());
+      return true;
+    });
+    render();
   },
   'remove-set': (el) => {
     const e = findEntry(el.dataset.entry);
@@ -1666,7 +1707,8 @@ const actions = {
     const lastSet = e.sets[e.sets.length - 1];
     const hasNumbers = lastSet.done || lastSet.w !== '' || lastSet.r !== '';
     if (hasNumbers && !confirm(`Set ${e.sets.length} of ${e.name} has numbers in it. Remove it anyway?`)) return;
-    e.sets.pop(); save(); render();
+    commit(() => { e.sets.pop(); });
+    render();
   },
   swap: (el) => openSheet({ kind: 'pick', purpose: 'swap', entryId: el.dataset.entry, q: '', cat: 'All' }),
   'pick-open': (el) => openSheet({ kind: 'pick', purpose: el.dataset.purpose, w: el.dataset.w, q: '', cat: 'All' }),
@@ -1686,9 +1728,7 @@ const actions = {
     const w = workoutById(el.dataset.w);
     if (!e || !w) return;
     if (w.exercises.some((x) => keyOf(x.name) === keyOf(e.name))) { toast(`${e.name} is already in ${w.name}.`); return; }
-    w.exercises.push(exercise(e.name, 3, '8-12'));
-    save();
-    toast(`Added to ${w.name}.`);
+    if (commit(() => { w.exercises.push(exercise(e.name, 3, '8-12')); })) toast(`Added to ${w.name}.`);
   },
 
   // History
@@ -1696,8 +1736,9 @@ const actions = {
   'delete-session': (el) => {
     const s = db.sessions.find((x) => x.id === el.dataset.id);
     if (!s || !confirm(`Delete ${s.name} from ${dateLabel(s.finishedAt)}? This can't be undone.`)) return;
-    db.sessions = db.sessions.filter((x) => x.id !== s.id);
-    save(); render(); toast('Workout deleted.');
+    const ok = commit(() => { db.sessions = db.sessions.filter((x) => x.id !== s.id); });
+    render();
+    if (ok) toast('Workout deleted.');
   },
 
   // Body weight
@@ -1706,8 +1747,8 @@ const actions = {
   'bw-delete': (el) => {
     const b = db.bodyweights.find((x) => x.id === el.dataset.id);
     if (!b || !confirm(`Delete the ${fmt(b.w)} ${db.settings.unit} weigh-in from ${dayLabel(b.date)}?`)) return;
-    db.bodyweights = db.bodyweights.filter((x) => x.id !== b.id);
-    save(); render();
+    commit(() => { db.bodyweights = db.bodyweights.filter((x) => x.id !== b.id); });
+    render();
   },
 
   // Food
@@ -1757,16 +1798,19 @@ const actions = {
   'food-delete-custom': (el) => {
     const f = db.foods.find((x) => x.id === el.dataset.id);
     if (!f || !confirm(`Delete ${f.name} from your foods? Days you already logged keep their numbers.`)) return;
-    db.foods = db.foods.filter((x) => x.id !== f.id);
-    save(); closeSheet(); render();
+    if (!commit(() => { db.foods = db.foods.filter((x) => x.id !== f.id); })) return;
+    closeSheet(); render();
   },
   targets: () => openSheet({ kind: 'targets' }),
   'targets-save': () => {
     const k = toNum($('#tg-kcal').value);
     const p = toNum($('#tg-p').value);
-    db.settings.calorieTarget = k > 0 ? Math.round(k) : null;
-    db.settings.proteinTarget = p > 0 ? Math.round(p) : null;
-    save(); closeSheet(); render(); toast('Targets saved.');
+    const ok = commit(() => {
+      db.settings.calorieTarget = k > 0 ? Math.round(k) : null;
+      db.settings.proteinTarget = p > 0 ? Math.round(p) : null;
+    });
+    if (!ok) return; // sheet stays open with what was typed
+    closeSheet(); render(); toast('Targets saved.');
   },
 
   // Program
@@ -1777,27 +1821,27 @@ const actions = {
     const i = w.exercises.findIndex((e) => e.id === el.dataset.e);
     const j = i + Number(el.dataset.dir);
     if (i < 0 || j < 0 || j >= w.exercises.length) return;
-    [w.exercises[i], w.exercises[j]] = [w.exercises[j], w.exercises[i]];
-    save(); render();
+    commit(() => { [w.exercises[i], w.exercises[j]] = [w.exercises[j], w.exercises[i]]; });
+    render();
   },
   'remove-ex': (el) => {
     const w = workoutById(el.dataset.w);
     const e = w && w.exercises.find((x) => x.id === el.dataset.e);
     if (!e || !confirm(`Remove ${e.name || 'this exercise'} from ${w.name}? Its history stays.`)) return;
-    w.exercises = w.exercises.filter((x) => x.id !== e.id);
-    save(); render();
+    commit(() => { w.exercises = w.exercises.filter((x) => x.id !== e.id); });
+    render();
   },
   'delete-workout': (el) => {
     const w = workoutById(el.dataset.w);
     if (!w) return;
     if (db.program.length <= 1) { toast('Keep at least one workout.'); return; }
     if (!confirm(`Delete workout ${w.name}? Logged history stays.`)) return;
-    db.program = db.program.filter((x) => x.id !== w.id);
-    save(); render();
+    commit(() => { db.program = db.program.filter((x) => x.id !== w.id); });
+    render();
   },
   'add-workout': () => {
-    db.program.push({ id: uid(), name: 'New workout', exercises: [] });
-    save(); render();
+    commit(() => { db.program.push({ id: uid(), name: 'New workout', exercises: [] }); });
+    render();
   },
 
   // Backup and settings
@@ -1806,9 +1850,9 @@ const actions = {
   erase: () => {
     const typed = prompt('This deletes every workout, weigh-in and food log on this phone. Type ERASE to confirm.');
     if (typed !== 'ERASE') return;
+    if (!commit(() => { db = defaultData(); })) { render(); return; }
     stopRest(); releaseWake();
-    db = defaultData();
-    save(); tab = 'today'; render(); toast('All data erased.');
+    tab = 'today'; render(); toast('All data erased.');
   },
   install: async () => {
     if (!deferredInstall) return;
@@ -1817,7 +1861,7 @@ const actions = {
     deferredInstall = null;
     render();
   },
-  'dismiss-install': () => { db.installTipDismissed = true; save(); render(); },
+  'dismiss-install': () => { commit(() => { db.installTipDismissed = true; }); render(); },
   'sheet-close': () => closeSheet(),
 
   // Recovery and safety copies
@@ -1827,17 +1871,23 @@ const actions = {
   'recovery-reload': () => location.reload(),
   'recovery-fresh': () => {
     if (!confirm('Start fresh? This replaces the unreadable data on this phone for good. Download it first if you might need it.')) return;
+    // save() refuses while recovery is set, so lift it for this one write and put it back on failure.
+    const prevDb = db;
+    const prevRecovery = recovery;
     recovery = null;
     db = defaultData();
-    if (save()) { render(); toast('Started fresh.'); }
+    if (!save()) { db = prevDb; recovery = prevRecovery; render(); return; }
+    render();
+    toast('Started fresh.');
   },
   'recovery-keep': () => {
     if (!recovery || !recovery.partial) return;
     if (!confirm(`Continue with what loaded? The ${recovery.dropped} unreadable record${recovery.dropped === 1 ? '' : 's'} will be gone for good. Download the saved data first if you might need it.`)) return;
+    const prevDb = db;
     const r = recovery;
     recovery = null;
     db = r.partial;
-    if (!save()) { recovery = r; db = defaultData(); return; }
+    if (!save()) { db = prevDb; recovery = r; render(); return; }
     render();
     toast('Continuing with the data that loaded.');
   },
@@ -1904,8 +1954,10 @@ document.addEventListener('change', (e) => {
   }
   if (el.dataset.setting) {
     const k = el.dataset.setting;
-    db.settings[k] = el.type === 'checkbox' ? el.checked : k === 'restSeconds' ? Number(el.value) : el.value;
-    save();
+    const ok = commit(() => {
+      db.settings[k] = el.type === 'checkbox' ? el.checked : k === 'restSeconds' ? Number(el.value) : el.value;
+    });
+    if (!ok) { render(); return; } // puts the control back to the saved setting
     if (k === 'keepAwake') { if (el.checked) keepAwake(); else releaseWake(); }
     return;
   }
@@ -1941,13 +1993,15 @@ document.addEventListener('keydown', (e) => {
 
 // Drop exercises left with no name when switching tabs.
 function tidyProgram() {
-  let changed = false;
-  db.program.forEach((w) => {
-    const before = w.exercises.length;
-    w.exercises = w.exercises.filter((x) => x.name.trim());
-    if (w.exercises.length !== before) changed = true;
+  commit(() => {
+    let changed = false;
+    db.program.forEach((w) => {
+      const before = w.exercises.length;
+      w.exercises = w.exercises.filter((x) => x.name.trim());
+      if (w.exercises.length !== before) changed = true;
+    });
+    return changed;
   });
-  if (changed) save();
 }
 document.querySelector('.tabs').addEventListener('click', tidyProgram, true);
 

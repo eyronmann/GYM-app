@@ -16,7 +16,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 2;
-const APP_VERSION = '2.0.2';
+const APP_VERSION = '2.0.3';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -193,11 +193,13 @@ const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 // and returns a complete, current-version object.
 // - Throws an error with code 'not-ours' if it isn't Gym Log data,
 //   and code 'newer' if a newer version of the app wrote it (we must not downgrade it).
-// - Nothing unreadable is dropped silently. Every bad record, and every list that is
-//   missing or isn't a list when that data version must have it, adds to report.dropped.
+// - Nothing damaged passes silently. Every problem adds 1 to report.dropped: a record that
+//   is left out, a field that had to be repaired (for example a missing id), or a list
+//   that is missing or isn't a list when that data version must have it.
 //   Callers keep an untouched copy of the original (or block saving) whenever it is > 0.
+// - Data this app wrote itself always passes with 0 (checked by the tests).
 function migrate(d, report = { dropped: 0 }) {
-  if (!d || typeof d !== 'object' || (!Array.isArray(d.sessions) && !Array.isArray(d.program))) {
+  if (!d || typeof d !== 'object' || Array.isArray(d) || (!Array.isArray(d.sessions) && !Array.isArray(d.program))) {
     throw Object.assign(new Error('Not Gym Log data'), { code: 'not-ours' });
   }
   if (d.version != null && !(Number.isInteger(d.version) && d.version >= 1)) {
@@ -206,13 +208,17 @@ function migrate(d, report = { dropped: 0 }) {
   if (d.version > DATA_VERSION) {
     throw Object.assign(new Error('Saved by a newer version'), { code: 'newer' });
   }
+  const problem = () => { report.dropped += 1; };
+  // Every version this app ever saved has a version number. Read a file without one
+  // by the oldest rules, but count it so the original is kept.
+  if (d.version == null) problem();
   const version = d.version == null ? 1 : d.version;
 
   // A list field. Missing is fine only where that data version didn't have it yet.
   const list = (value, requiredFrom = 1) => {
     if (Array.isArray(value)) return value;
     if (value === undefined && version < requiredFrom) return [];
-    report.dropped += 1; // the whole list is unreadable or missing
+    problem(); // the whole list is unreadable or missing
     return [];
   };
   // Keep the items that pass, and count the ones that don't.
@@ -221,6 +227,8 @@ function migrate(d, report = { dropped: 0 }) {
     report.dropped += arr.length - out.length;
     return out;
   };
+  const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+  const isStr = (v) => typeof v === 'string';
   // Stored numbers must really be numbers. A damaged value is never quietly turned into 0.
   const num = (v) => {
     if (typeof v === 'number') return Number.isFinite(v) ? v : NaN;
@@ -228,71 +236,127 @@ function migrate(d, report = { dropped: 0 }) {
     return NaN;
   };
   const isAmount = (v) => Number.isFinite(num(v)) && num(v) >= 0;
-  const isEmpty = (v) => v === null || v === undefined || v === '';
   const isNutrition = (x) => ['kcal', 'p', 'c', 'f'].every((k) => isAmount(x[k]));
+  const isDate = (v) => isStr(v) && !Number.isNaN(new Date(v).getTime());
+  // Ids link records together. A missing one is repaired, and counted.
+  const idOf = (x, prefix = '') => (isStr(x.id) && x.id ? x.id : (problem(), `${prefix}${uid()}`));
+  // A text field the app always writes as text. Anything else is repaired to the fallback, and counted.
+  const text = (v, fallback) => (isStr(v) ? v : (problem(), fallback));
 
   const base = defaultData();
 
-  let settings = {};
+  // Settings: keep what's valid, count what isn't.
+  const settings = { ...base.settings };
   if (d.settings !== undefined) {
-    if (d.settings && typeof d.settings === 'object' && !Array.isArray(d.settings)) settings = d.settings;
-    else report.dropped += 1;
+    if (!isObj(d.settings)) problem();
+    else {
+      const valid = {
+        unit: (v) => v === 'kg' || v === 'lb',
+        restSeconds: (v) => Number.isInteger(v) && v >= 0 && v <= 3600,
+        restSound: (v) => typeof v === 'boolean',
+        keepAwake: (v) => typeof v === 'boolean',
+        calorieTarget: (v) => v === null || (typeof v === 'number' && v > 0),
+        proteinTarget: (v) => v === null || (typeof v === 'number' && v > 0),
+      };
+      Object.keys(d.settings).forEach((k) => {
+        if (!valid[k]) return; // not a setting this version uses
+        if (valid[k](d.settings[k])) settings[k] = d.settings[k];
+        else problem();
+      });
+    }
   }
 
-  const program = keep(list(d.program), (w) => w && typeof w === 'object')
+  // Program. Names may be empty: that's a box the user hasn't filled in yet.
+  const programList = list(d.program);
+  const program = keep(programList, isObj)
     .map((w) => ({
-      id: String(w.id || uid()),
-      name: String(w.name || 'Workout'),
-      exercises: keep(list(w.exercises), (e) => e && e.name)
-        .map((e) => ({ id: String(e.id || uid()), name: String(e.name), sets: clampSets(e.sets), reps: String(e.reps ?? '') })),
+      id: idOf(w),
+      name: text(w.name, 'Workout'),
+      exercises: keep(list(w.exercises), (e) => isObj(e) && isStr(e.name))
+        .map((e) => ({
+          id: idOf(e),
+          name: e.name,
+          sets: Number.isInteger(e.sets) && e.sets >= 1 && e.sets <= 10 ? e.sets : (problem(), clampSets(e.sets)),
+          reps: text(e.reps, ''),
+        })),
     }));
+  if (!program.length && Array.isArray(d.program)) problem(); // an empty program is replaced by the starter one
 
-  const sessions = keep(list(d.sessions), (s) => s && s.finishedAt && !Number.isNaN(new Date(s.finishedAt).getTime()) && Array.isArray(s.entries))
+  // Finished workouts. A set's weight is a number, or null for bodyweight; missing means damaged.
+  const isSet = (x) => isObj(x) && isAmount(x.r) && num(x.r) > 0 && (x.w === null || isAmount(x.w));
+  const sessions = keep(list(d.sessions), (s) => isObj(s) && isDate(s.finishedAt) && Array.isArray(s.entries))
     .map((s) => ({
       ...s,
-      entries: keep(s.entries, (e) => e && e.name)
+      id: idOf(s),
+      startedAt: isDate(s.startedAt) ? s.startedAt : (problem(), s.finishedAt),
+      label: text(s.label, 'A'),
+      name: text(s.name, ''),
+      entries: keep(s.entries, (e) => isObj(e) && isStr(e.name))
         .map((e) => ({
           ...e,
-          key: e.key || keyOf(e.name),
-          sets: keep(list(e.sets), (x) => x && isAmount(x.r) && (isEmpty(x.w) || isAmount(x.w)))
-            .map((x) => ({ w: isEmpty(x.w) ? null : num(x.w), r: num(x.r) })),
+          key: isStr(e.key) && e.key ? e.key : (problem(), keyOf(e.name)),
+          sets: keep(list(e.sets), isSet).map((x) => ({ w: x.w === null ? null : num(x.w), r: num(x.r) })),
         })),
     }))
     .sort((a, b) => new Date(a.finishedAt) - new Date(b.finishedAt));
 
+  // The workout in progress. Its set values are text while typing, and done is true/false.
   let active = null;
-  if (d.active) {
-    if (Array.isArray(d.active.entries) && d.active.entries.every((e) => e && Array.isArray(e.sets))) active = d.active;
-    else report.dropped += 1;
+  if (d.active != null) {
+    const a = d.active;
+    if (isObj(a) && Array.isArray(a.entries) && isDate(a.startedAt)) {
+      const isField = (v) => isStr(v) || (typeof v === 'number' && Number.isFinite(v));
+      active = {
+        ...a,
+        id: idOf(a),
+        label: text(a.label, 'A'),
+        name: text(a.name, ''),
+        entries: keep(a.entries, (e) => isObj(e) && isStr(e.name) && Array.isArray(e.sets))
+          .map((e) => ({
+            ...e,
+            id: idOf(e),
+            key: isStr(e.key) && e.key ? e.key : (problem(), keyOf(e.name)),
+            sets: keep(e.sets, (x) => isObj(x) && typeof x.done === 'boolean' && isField(x.w) && isField(x.r))
+              .map((x) => ({ w: String(x.w), r: String(x.r), done: x.done })),
+          })),
+      };
+    } else problem();
   }
 
   // Added in data version 2: required from version 2 on, legitimately absent in version 1.
-  const bodyweights = keep(list(d.bodyweights, 2), (b) => b && isDay(b.date) && num(b.w) > 0)
-    .map((b) => ({ id: String(b.id || uid()), date: b.date, w: num(b.w) }))
+  const bodyweights = keep(list(d.bodyweights, 2), (b) => isObj(b) && isDay(b.date) && num(b.w) > 0)
+    .map((b) => ({ id: idOf(b), date: b.date, w: num(b.w) }))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const foods = keep(list(d.foods, 2), (x) => x && x.name && isNutrition(x))
+  const foods = keep(list(d.foods, 2), (x) => isObj(x) && isStr(x.name) && x.name && isNutrition(x))
     .map((x) => ({
-      id: String(x.id || `c-${uid()}`), name: String(x.name), serving: String(x.serving || '1 serving'),
+      id: idOf(x, 'c-'), name: x.name, serving: text(x.serving, '1 serving'),
       kcal: num(x.kcal), p: num(x.p), c: num(x.c), f: num(x.f), custom: true,
     }));
-  const foodLog = keep(list(d.foodLog, 2), (x) => x && isDay(x.date) && x.name && isNutrition(x) && num(x.qty) > 0)
+  const foodLog = keep(list(d.foodLog, 2), (x) => isObj(x) && isDay(x.date) && isStr(x.name) && x.name && isNutrition(x) && num(x.qty) > 0)
     .map((x) => ({
-      id: String(x.id || uid()), date: x.date, foodId: x.foodId ? String(x.foodId) : null,
-      name: String(x.name), serving: String(x.serving || ''), qty: num(x.qty),
+      id: idOf(x), date: x.date,
+      foodId: x.foodId === null || x.foodId === undefined ? null : (isStr(x.foodId) ? x.foodId : (problem(), null)),
+      name: x.name, serving: text(x.serving, ''), qty: num(x.qty),
       kcal: num(x.kcal), p: num(x.p), c: num(x.c), f: num(x.f),
     }));
 
+  let lastBackupAt = null;
+  if (d.lastBackupAt != null) {
+    if (isDate(d.lastBackupAt)) lastBackupAt = d.lastBackupAt;
+    else problem();
+  }
+
   return {
     version: DATA_VERSION,
-    settings: { ...base.settings, ...settings },
+    settings,
     program: program.length ? program : base.program,
     sessions,
     active,
     bodyweights,
     foods,
     foodLog,
-    lastBackupAt: d.lastBackupAt || null,
-    installTipDismissed: !!d.installTipDismissed,
+    lastBackupAt,
+    installTipDismissed: d.installTipDismissed === true,
   };
 }
 
@@ -381,7 +445,7 @@ function load() {
       recovery = { reason: 'skipped', raw, partial: data, dropped: report.dropped };
       return defaultData();
     }
-    startupNotice = `${report.dropped} saved record${report.dropped === 1 ? '' : 's'} couldn't be read and ${report.dropped === 1 ? 'was' : 'were'} left out. An untouched copy of everything was kept in More > Backup and settings.`;
+    startupNotice = `${report.dropped} problem${report.dropped === 1 ? ' was' : 's were'} found in your saved data, so damaged records were left out or repaired. An untouched copy of everything was kept in More > Backup and settings.`;
   }
   return data;
 }
@@ -508,6 +572,14 @@ function suggestion(entry, i, last) {
   return src ? { w: fmt(src.w), r: src.r != null ? String(src.r) : '' } : { w: '', r: '' };
 }
 
+// A typed weight is fine when empty (bodyweight) or a number of zero or more.
+// (toNum('abc') is null, and null >= 0 is true in JavaScript, hence the explicit check.)
+function validWeight(w) {
+  if (w === '' || w == null) return true;
+  const n = toNum(w);
+  return n !== null && n >= 0;
+}
+
 function newSet() {
   return { w: '', r: '', done: false };
 }
@@ -544,6 +616,7 @@ function findEntry(entryId) {
 
 function toggleSet(entryId, i) {
   let needReps = false;
+  let badWeight = false;
   let ticked = null;
   const ok = commit(() => {
     const entry = findEntry(entryId);
@@ -554,14 +627,15 @@ function toggleSet(entryId, i) {
     if (set.w === '') set.w = sug.w;
     if (set.r === '') set.r = sug.r;
     if (!(toNum(set.r) > 0)) { needReps = true; return false; }
+    if (!validWeight(set.w)) { badWeight = true; return false; }
     set.done = true;
     ticked = entry.name;
     return true;
   });
   render();
-  if (needReps) {
-    toast('Enter the reps you did, then tick the set.');
-    const input = document.querySelector(`input[data-entry="${entryId}"][data-set="${i}"][data-field="r"]`);
+  if (needReps || badWeight) {
+    toast(needReps ? 'Enter the reps you did, then tick the set.' : 'That weight isn\'t a number. Fix it, or leave it empty for bodyweight.');
+    const input = document.querySelector(`input[data-entry="${entryId}"][data-set="${i}"][data-field="${needReps ? 'r' : 'w'}"]`);
     if (input) input.focus();
   }
   if (ok && ticked) startRest(ticked);
@@ -606,6 +680,12 @@ function finishWorkout() {
 
   if (!entries.length) {
     if (confirm('No sets are ticked, so there is nothing to save. Discard this workout?')) discardWorkout(true);
+    return;
+  }
+  // A ticked set can still be edited, so check its weight again before saving it for good.
+  const badEntry = a.entries.find((e) => e.sets.some((x) => x.done && !validWeight(x.w)));
+  if (badEntry) {
+    toast(`A ticked ${badEntry.name} set has a weight that isn't a number. Fix it, or leave it empty for bodyweight.`);
     return;
   }
   const unticked = a.entries.reduce((n, e) => n + e.sets.filter((s) => !s.done && (s.w !== '' || s.r !== '')).length, 0);
@@ -866,7 +946,7 @@ function importBackup(file) {
       toast("Your saved data can't be read right now, so restoring is paused to avoid writing over it. Reload the app first.");
       return;
     }
-    if (report.dropped > 0 && !confirm(`${report.dropped} record${report.dropped === 1 ? '' : 's'} in this backup can't be read and would be left out. Import the rest anyway?`)) return;
+    if (report.dropped > 0 && !confirm(`This backup has ${report.dropped} problem${report.dropped === 1 ? '' : 's'}: damaged records would be left out or repaired. Import it anyway?`)) return;
     const n = data.sessions.length;
     if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'} and ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'}.`)) return;
 
@@ -968,7 +1048,7 @@ function recoveryHtml() {
       </div>`;
   }
   const what = recovery.reason === 'skipped'
-    ? `${recovery.dropped} saved record${recovery.dropped === 1 ? '' : 's'} couldn't be read`
+    ? `${recovery.dropped} problem${recovery.dropped === 1 ? ' was' : 's were'} found in your saved data`
     : "Your saved data couldn't be read";
   const next = recovery.reason === 'skipped'
     ? '<button type="button" class="btn small" data-action="recovery-keep">Keep what loaded</button>'
@@ -1433,7 +1513,7 @@ const COPY_LABELS = {
   'before-import': 'Before a restore',
   'other-window': 'This window, before another window saved',
   unreadable: "Data that couldn't be read",
-  skipped: 'Before unreadable records were left out',
+  skipped: 'Before damaged records were left out or repaired',
 };
 
 function safetyCopiesHtml() {
@@ -1817,7 +1897,7 @@ const actions = {
     if (kcal == null || kcal < 0) { toast('Enter the calories per serving.'); $('#nf-kcal').focus(); return; }
     const food = {
       id: `c-${uid()}`, name, serving: $('#nf-serving').value.trim() || '1 serving',
-      kcal, p: toNum($('#nf-p').value) || 0, c: toNum($('#nf-c').value) || 0, f: toNum($('#nf-f').value) || 0, custom: true,
+      kcal, p: Math.max(0, toNum($('#nf-p').value) || 0), c: Math.max(0, toNum($('#nf-c').value) || 0), f: Math.max(0, toNum($('#nf-f').value) || 0), custom: true,
     };
     db.foods.unshift(food);
     if (!save()) { db.foods.shift(); return; }
@@ -1911,7 +1991,7 @@ const actions = {
   },
   'recovery-keep': () => {
     if (!recovery || !recovery.partial) return;
-    if (!confirm(`Continue with what loaded? The ${recovery.dropped} unreadable record${recovery.dropped === 1 ? '' : 's'} will be gone for good. Download the saved data first if you might need it.`)) return;
+    if (!confirm(`Continue with what loaded? Damaged records will be left out or repaired for good (${recovery.dropped} problem${recovery.dropped === 1 ? '' : 's'}). Download the saved data first if you might need it.`)) return;
     const prevDb = db;
     const r = recovery;
     recovery = null;

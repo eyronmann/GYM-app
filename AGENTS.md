@@ -98,7 +98,16 @@ More (program, backup and settings).
   record it can't read in `report.dropped`; callers keep a copy or ask first.
   A list that is missing or isn't a list counts too (program and sessions always;
   bodyweights, foods and foodLog from version 2), and so does a damaged number:
-  it is never turned into 0.
+  it is never turned into 0. Repaired fields (a missing id, a bad set count,
+  a missing version) are counted as well. A set's weight must be a number or
+  `null` (bodyweight); a missing weight is damage, not bodyweight. Data the app
+  wrote itself always counts 0; keep it that way when adding fields.
+- Recovery mode also covers storage that can't be read at all (`'read-failed'`):
+  nothing is saved or restored until a reload can read it.
+- When another window of the app saves (the `storage` event), this window keeps
+  anything that exists only in its memory as a safety copy (`other-window`),
+  then reloads so every startup check runs on what was saved. It never writes
+  its own older copy over the other window's data.
 
 ## Built-in data accuracy
 

@@ -306,6 +306,7 @@ function clampSets(v) {
 /* ------------------------------------------------------------------ */
 
 let startupNotice = '';
+const NOTE_KEY = 'gymlog.note'; // sessionStorage: a message to show after a reload
 
 // Recovery mode: set when saved data exists but can't be used safely AND we couldn't
 // keep a copy of it. While it is set, save() refuses to write, so nothing is overwritten.
@@ -386,15 +387,21 @@ function load() {
 }
 
 // Returns true only if the data really reached storage.
+// True while this window shows changes that storage refused (only typing can leave these).
+let unsaved = false;
+
 function save() {
   if (recovery) {
+    unsaved = true;
     toast('Not saved: your earlier data needs recovering first. See the notice on the Today tab.');
     return false;
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    unsaved = false;
     return true;
   } catch (e) {
+    unsaved = true;
     toast('Could not save. Phone storage may be full. Download a backup from More > Backup and settings now.');
     return false;
   }
@@ -424,6 +431,13 @@ function commit(change) {
 /* ------------------------------------------------------------------ */
 
 let db = load();
+try {
+  const note = sessionStorage.getItem(NOTE_KEY);
+  if (note) {
+    sessionStorage.removeItem(NOTE_KEY);
+    startupNotice = startupNotice ? `${note} ${startupNotice}` : note;
+  }
+} catch (_) { /* sessionStorage blocked */ }
 let tab = 'today';
 let historyMode = 'sessions';
 let bodyMode = 'weight';
@@ -1417,6 +1431,7 @@ function viewData() {
 
 const COPY_LABELS = {
   'before-import': 'Before a restore',
+  'other-window': 'This window, before another window saved',
   unreadable: "Data that couldn't be read",
   skipped: 'Before unreadable records were left out',
 };
@@ -2033,11 +2048,33 @@ window.addEventListener('beforeinstallprompt', (e) => {
   if (tab === 'today' && !db.active) render();
 });
 
+// Another window of this app (a browser tab, or the installed app) saved data.
+// This window's copy in memory is now out of date, and writing it would overwrite the
+// other window's work. So: keep anything here that only exists in memory as a safety
+// copy, then reload, which runs every startup check (version, damaged records, safety
+// copies, recovery mode) on what was actually saved.
 window.addEventListener('storage', (e) => {
-  // Another tab changed the data: reload it so the two never overwrite each other.
-  if (e.key === STORAGE_KEY && e.newValue) {
-    try { db = migrate(JSON.parse(e.newValue)); render(); } catch (_) { /* ignore */ }
+  if (e.key !== STORAGE_KEY) return; // safety copies and other keys don't matter here
+
+  // Saved data that only this window holds (unreadable or partly unreadable, no copy yet).
+  if (recovery && recovery.raw && (recovery.reason === 'unreadable' || recovery.reason === 'skipped')
+      && !keepSafetyCopy(recovery.reason, recovery.raw)) {
+    // No room to keep it, and reloading would lose it. Stay put so it can still be downloaded.
+    startupNotice = 'Another window changed your data. Download the saved data below before you reload, or it will be lost.';
+    closeSheet();
+    render();
+    return;
   }
+
+  let note = 'Reloaded because your data was changed in another window.';
+  // Changes here that storage refused, or data the other window just cleared: keep them too.
+  if (unsaved || e.newValue === null) {
+    note = keepSafetyCopy('other-window', JSON.stringify(db))
+      ? 'Reloaded because your data was changed in another window. What this window had was kept as a safety copy in More > Backup and settings.'
+      : "Reloaded because your data was changed in another window. Changes this window couldn't save were lost.";
+  }
+  try { sessionStorage.setItem(NOTE_KEY, note); } catch (_) { /* no note, still safe */ }
+  location.reload();
 });
 
 // Workout clock: update just the number once a second.

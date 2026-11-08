@@ -80,9 +80,12 @@ More (program, backup and settings).
 
 ## Protecting saved data (how the code does rule 4)
 
-- `save()` returns `true` only when storage accepted the write. Anything that
-  tells the user "saved" (finish workout, weigh-in, food, restore) checks it and
-  rolls back on `false`.
+- `save()` returns `true` only when storage accepted the write. Every tap that
+  changes data goes through `commit(change)`: snapshot, change, save, and undo
+  the change if the save fails. Success messages only appear after it returns
+  `true`. The one exception is typing into a box: the text stays on screen if a
+  save fails (the failure toast says so), because undoing keystrokes would fight
+  the user.
 - Safety copies are kept as `gymlog.v1.<reason>.<timestamp>` with reason
   `unreadable`, `skipped` (some records couldn't be read) or `before-import`.
   The app never deletes them; the owner downloads or deletes them in
@@ -93,6 +96,9 @@ More (program, backup and settings).
   pauses saving; the fix is reloading to get the newer app.
 - `migrate()` rejects data with an unknown or newer `version`, and counts every
   record it can't read in `report.dropped`; callers keep a copy or ask first.
+  A list that is missing or isn't a list counts too (program and sessions always;
+  bodyweights, foods and foodLog from version 2), and so does a damaged number:
+  it is never turned into 0.
 
 ## Built-in data accuracy
 

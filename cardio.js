@@ -61,6 +61,7 @@ let lastFixAt = null;      // time of the last good fix, used to spot gaps
 let lastRunSaveAt = 0;
 let touchLock = false;
 let stepState = null;      // motion-sensor step counting, while it is running
+let stepRequest = 0;       // goes up on every start and stop of step counting, so a late permission answer can be recognised
 let mapDrawn = '';         // what the live map last drew, so it is only redrawn when something changed
 
 /* ------------------------------------------------------------------ */
@@ -402,8 +403,14 @@ function addPoint(r, here, t, acc) {
 // Only ever called from a Start or Resume tap: iPhones grant the motion sensor only from a tap.
 function startSteps() {
   if (stepState || !('DeviceMotionEvent' in window)) return;
+  stepRequest += 1;
+  const mine = stepRequest;
   const begin = () => {
-    if (stepState) return;
+    // The phone may answer the permission question late: after a pause, a finish, a discard,
+    // or a newer request. Listen only if this is still the latest request and its run is
+    // still being tracked.
+    const r = db.activeRun;
+    if (mine !== stepRequest || stepState || !r || !r.gps || r.paused) return;
     stepState = { avg: 9.8, up: false, lastAt: 0 };
     window.addEventListener('devicemotion', onMotion);
   };
@@ -413,6 +420,7 @@ function startSteps() {
 }
 
 function stopSteps() {
+  stepRequest += 1; // any permission answer still on its way is now out of date
   window.removeEventListener('devicemotion', onMotion);
   stepState = null;
 }

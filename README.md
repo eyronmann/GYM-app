@@ -18,6 +18,14 @@ no signal, and keeps everything on the phone.
   group (legs, chest, back, shoulders, arms, core).
 - Each one has form cues, alternatives, a link to form videos, my last and best
   numbers, and buttons to add it to a workout.
+- **Mobility & posture:** 46 warm-up, mobility, posture and cooldown moves, each
+  with steps, what to avoid, what it needs and alternatives. Filter by type and
+  by body area (neck and shoulders, upper back, hips, ankles, wrists, lower body).
+- Ten routines I can start, tick off and save: warm-ups and cooldowns for
+  full-body, upper-body, lower-body and running days, plus posture and mobility.
+  Today offers the warm-up and cooldown that match the next workout.
+- I can also log a single move with minutes and notes. This is general exercise
+  guidance, not medical advice.
 
 **Body**
 - Weight: one weigh-in per day, the 7-day average, the change from the week
@@ -26,7 +34,7 @@ no signal, and keeps everything on the phone.
   *kanin* or *itlog*), pick how many servings, and see calories, protein, carbs
   and fat. Add my own foods from labels. Daily totals against my targets.
 
-**History** keeps every workout and each exercise's best set.
+**History** keeps every workout, each exercise's best set, and my mobility log.
 **More** has my program editor, backup and settings.
 
 ## Install it on my phone

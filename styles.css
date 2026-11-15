@@ -117,7 +117,7 @@ p { margin: 0 0 12px; }
 }
 .icon-btn:disabled { opacity: .35; }
 
-input[type="text"], input[type="number"], input[type="date"], input:not([type]), select {
+input[type="text"], input[type="number"], input[type="date"], input:not([type]), select, textarea {
   width: 100%; min-height: 44px; padding: 8px 10px;
   background: var(--mat-2); border: 1px solid var(--line); border-radius: var(--radius-input);
   font-size: 16px; /* 16px stops iOS zooming into inputs */
@@ -226,11 +226,11 @@ tr.done .tick { background: var(--chalk); border-color: var(--chalk); color: var
 .timer.over { background: var(--plate-yellow); }
 
 /* ---------- History ---------- */
-.seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; background: var(--mat); border-radius: 12px; margin-bottom: 14px; }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; padding: 4px; background: var(--mat); border-radius: 12px; margin-bottom: 14px; }
 .seg button { min-height: 44px; border: 0; border-radius: 9px; background: transparent; color: var(--dust); font-weight: 650; }
 .seg button[aria-pressed="true"] { background: var(--mat-2); color: var(--chalk); }
 
-details.card > summary { list-style: none; cursor: pointer; }
+details.card > summary { list-style: none; cursor: pointer; min-height: 44px; }
 details.card > summary::-webkit-details-marker { display: none; }
 details.card[open] > summary { margin-bottom: 10px; }
 .sess-lines { list-style: none; padding: 0; margin: 0 0 10px; }
@@ -387,3 +387,20 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, .6); }
   @keyframes sheet-up { from { transform: translateY(24px); opacity: .6; } to { transform: none; opacity: 1; } }
 }
 .row.wrap { flex-wrap: wrap; }
+
+/* ================= Routines: warm-up, mobility, posture, cooldown ================= */
+textarea { display: block; resize: vertical; line-height: 1.4; }
+/* One step of a routine: tick (or its number before Start), then the name and how-to */
+.step { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.step:last-of-type { border-bottom: 0; }
+.step .tick { flex: none; }
+.step .tick[aria-pressed="true"] { background: var(--chalk); border-color: var(--chalk); color: var(--floor); }
+.step-n {
+  flex: none; width: 50px; height: 48px; display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 10px; color: var(--dust); font-weight: 700;
+}
+.step summary { list-style: none; cursor: pointer; min-height: 44px; }
+.step summary::-webkit-details-marker { display: none; }
+.step summary .muted { display: block; }
+.step details[open] summary { margin-bottom: 8px; }
+ol.cues { padding-left: 22px; }

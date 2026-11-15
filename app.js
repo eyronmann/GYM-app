@@ -7,16 +7,17 @@
   There is no server. The only copy of the data outside the phone is a
   backup file the user exports from More > Backup and settings.
 
-  Built-in data lives in data/exercises.js (window.EXERCISES) and
-  data/foods.js (window.FOODS).
+  Built-in data lives in data/exercises.js (window.EXERCISES),
+  data/routines.js (window.MOVES, window.ROUTINES) and data/foods.js
+  (window.FOODS).
 
   Read AGENTS.md before changing this file. The data-format rules there
   are what keep old workouts readable after an update.
 */
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
-const DATA_VERSION = 2;
-const APP_VERSION = '2.0.4';
+const DATA_VERSION = 3;
+const APP_VERSION = '3.0.0';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -27,6 +28,8 @@ const PLATES = [
 ];
 
 const CATS = ['Legs', 'Chest', 'Back', 'Shoulders', 'Arms', 'Core'];
+const MOVE_TYPES = ['Warm-up', 'Mobility', 'Posture', 'Cooldown'];
+const MOVE_ZONES = ['Neck & shoulders', 'Upper back', 'Hips', 'Ankles', 'Wrists', 'Lower body', 'Core', 'Whole body'];
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -123,6 +126,13 @@ const LIB_BY_KEY = new Map(LIB.map((e) => [keyOf(e.name), e]));
 const libFor = (name) => LIB_BY_KEY.get(keyOf(name)) || null;
 const altsOf = (e) => (e && Array.isArray(e.alts) ? e.alts.map((id) => LIB_BY_ID.get(id)).filter(Boolean) : []);
 
+// Warm-up, mobility, posture and cooldown moves, and the routines built from them.
+const MOVES = Array.isArray(window.MOVES) ? window.MOVES : [];
+const MOVE_BY_ID = new Map(MOVES.map((m) => [m.id, m]));
+const ROUTINES = Array.isArray(window.ROUTINES) ? window.ROUTINES : [];
+const ROUTINE_BY_ID = new Map(ROUTINES.map((r) => [r.id, r]));
+const routineMoves = (r) => r.moves.map((id) => MOVE_BY_ID.get(id)).filter(Boolean);
+
 const FOOD_DB = Array.isArray(window.FOODS) ? window.FOODS : [];
 const FOOD_BY_ID = new Map(FOOD_DB.map((f) => [f.id, f]));
 
@@ -182,6 +192,7 @@ function defaultData() {
     bodyweights: [],
     foods: [],
     foodLog: [],
+    moveLog: [],
     lastBackupAt: null,
     installTipDismissed: false,
   };
@@ -189,7 +200,7 @@ function defaultData() {
 
 const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-// Takes anything that looks like saved data (from storage or a backup file, version 1 or 2)
+// Takes anything that looks like saved data (from storage or a backup file, version 1, 2 or 3)
 // and returns a complete, current-version object.
 // - Throws an error with code 'not-ours' if it isn't Gym Log data,
 //   and code 'newer' if a newer version of the app wrote it (we must not downgrade it).
@@ -340,6 +351,17 @@ function migrate(d, report = { dropped: 0 }) {
       kcal: num(x.kcal), p: num(x.p), c: num(x.c), f: num(x.f),
     }));
 
+  // Added in data version 3: the log of finished routines and single moves.
+  // secs is null when no duration was given. Names are copies, so they never change later.
+  const optAmount = (v) => v === null || isAmount(v);
+  const moveLog = keep(list(d.moveLog, 3), (x) => isObj(x) && isDate(x.at) && isStr(x.name) && x.name && optAmount(x.secs)
+      && Array.isArray(x.done) && x.done.every(isStr) && Number.isInteger(x.total) && x.total >= x.done.length)
+    .map((x) => ({
+      id: idOf(x), at: x.at, name: x.name, kind: text(x.kind, 'Mobility'),
+      secs: x.secs === null ? null : num(x.secs), done: [...x.done], total: x.total, notes: text(x.notes, ''),
+    }))
+    .sort((a, b) => new Date(a.at) - new Date(b.at));
+
   let lastBackupAt = null;
   if (d.lastBackupAt != null) {
     if (isDate(d.lastBackupAt)) lastBackupAt = d.lastBackupAt;
@@ -355,6 +377,7 @@ function migrate(d, report = { dropped: 0 }) {
     bodyweights,
     foods,
     foodLog,
+    moveLog,
     lastBackupAt,
     installTipDismissed: d.installTipDismissed === true,
   };
@@ -548,6 +571,9 @@ let tab = 'today';
 let historyMode = 'sessions';
 let bodyMode = 'weight';
 let moreMode = 'program';
+let libMode = 'lifts';    // Exercises shows lifts, or warm-up, mobility, posture and cooldown moves
+let prepType = 'All';
+let prepZone = 'All';
 let foodDate = localDate();
 let libQ = '';
 let libCat = 'All';
@@ -990,7 +1016,7 @@ function importBackup(file) {
     }
     if (report.dropped > 0 && !confirm(`This backup has ${report.dropped} problem${report.dropped === 1 ? '' : 's'}: damaged records would be left out or repaired. Import it anyway?`)) return;
     const n = data.sessions.length;
-    if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'} and ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'}.`)) return;
+    if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'}, ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'} and ${data.moveLog.length} mobility entr${data.moveLog.length === 1 ? 'y' : 'ies'}.`)) return;
 
     // Keep an untouched copy of what is being replaced. No copy, no import.
     let current = null;
@@ -1137,7 +1163,7 @@ function noticesHtml() {
       </div>`);
   }
 
-  const total = db.sessions.length + db.foodLog.length + db.bodyweights.length;
+  const total = db.sessions.length + db.foodLog.length + db.bodyweights.length + db.moveLog.length;
   if (total >= 5 && daysSince(db.lastBackupAt) > 14) {
     const when = db.lastBackupAt ? `Last backup ${ago(db.lastBackupAt)}.` : 'You have never backed up.';
     out.push(`
@@ -1152,6 +1178,32 @@ function noticesHtml() {
 /* ------------------------------------------------------------------ */
 /* Views: Today and the workout                                        */
 /* ------------------------------------------------------------------ */
+
+// Which warm-up and cooldown fit a workout: upper, lower or full body, judged from its lifts.
+function focusOf(names) {
+  let upper = 0;
+  let lower = 0;
+  names.forEach((name) => {
+    const lib = libFor(name);
+    if (!lib || lib.cat === 'Core') return;
+    if (lib.cat === 'Legs') lower += 1; else upper += 1;
+  });
+  if (upper && !lower) return 'upper';
+  if (lower && !upper) return 'lower';
+  return 'full';
+}
+
+function prepButtonsHtml(names, small) {
+  const focus = focusOf(names);
+  const cls = small ? 'btn small ghost' : 'btn small';
+  return `
+    <div class="switch">
+      <button type="button" class="${cls}" data-action="routine-open" data-id="warmup-${focus}">Warm-up</button>
+      <button type="button" class="${cls}" data-action="routine-open" data-id="cooldown-${focus}">Cooldown</button>
+      ${small ? '' : `<button type="button" class="${cls}" data-action="routine-open" data-id="posture">Posture</button>
+      <button type="button" class="${cls}" data-action="routine-open" data-id="mobility">Mobility</button>`}
+    </div>`;
+}
 
 function viewToday() {
   if (!db.program.length) {
@@ -1184,6 +1236,7 @@ function viewToday() {
       ${w.exercises.map((e) => `<li><span>${esc(e.name)}</span><span class="muted num">${e.sets} × ${esc(repsText(e.reps))}</span></li>`).join('')}
     </ul>
     <button type="button" class="btn plate block" data-action="start" data-index="${i}" style="${plateStyle(i)}">Start workout ${letter(i)}</button>
+    ${prepButtonsHtml(w.exercises.map((e) => e.name), false)}
     ${others ? `<p class="muted small" style="margin:18px 0 0">Doing a different one today?</p><div class="switch">${others}</div>` : ''}`;
 }
 
@@ -1254,6 +1307,7 @@ function viewWorkout() {
       </div>
       <div class="clock" aria-label="Workout time"><span class="num" id="wo-clock">${clockText(a.startedAt)}</span></div>
     </div>
+    <div style="margin:-4px 0 14px">${prepButtonsHtml(a.entries.map((e) => e.name), true)}</div>
     ${cards || '<div class="empty"><strong>This workout has no exercises.</strong>Add one below.</div>'}
     <button type="button" class="btn block ghost" style="margin-top:12px" data-action="pick-open" data-purpose="workout-add">Add an exercise</button>
     <div class="finish-bar">
@@ -1266,8 +1320,41 @@ function viewWorkout() {
 /* Views: Exercises                                                    */
 /* ------------------------------------------------------------------ */
 
-function viewExercises() {
+function moveListHtml(list) {
+  return list.map((m) => `
+    <button type="button" class="list-item" data-action="move-open" data-id="${m.id}">
+      <span class="grow"><span class="li-title">${esc(m.name)}</span><span class="muted small">${esc(m.type)}, ${esc(m.zone.toLowerCase())}. ${esc(m.dose)}</span></span>
+      <span class="chev" aria-hidden="true">›</span>
+    </button>`).join('');
+}
+
+function prepChipsHtml(action, current, options, label) {
+  return `<div class="chips" role="group" aria-label="${label}">${['All', ...options]
+    .map((t) => `<button type="button" class="chip-btn" data-action="${action}" data-v="${esc(t)}" aria-pressed="${t === current}">${esc(t === 'All' ? `All ${label.toLowerCase()}s` : t)}</button>`)
+    .join('')}</div>`;
+}
+
+// Warm-up, mobility, posture and cooldown: ready-made routines first, then every move.
+function viewPrep() {
+  const routines = ROUTINES.map((r) => `
+    <button type="button" class="list-item" data-action="routine-open" data-id="${r.id}">
+      <span class="grow"><span class="li-title">${esc(r.name)}</span><span class="muted small">${esc(r.when)}. About ${r.mins} min, ${r.moves.length} moves</span></span>
+      <span class="chev" aria-hidden="true">›</span>
+    </button>`).join('');
+  const list = MOVES.filter((m) => (prepType === 'All' || m.type === prepType) && (prepZone === 'All' || m.zone === prepZone));
   return `
+    <section class="card"><h3 class="sub">Routines to follow</h3><div class="list">${routines}</div></section>
+    <h3 class="sub" style="margin:18px 0 8px">All moves</h3>
+    ${prepChipsHtml('prep-type', prepType, MOVE_TYPES, 'Type')}
+    ${prepChipsHtml('prep-zone', prepZone, MOVE_ZONES, 'Body area')}
+    <div class="list">${moveListHtml(list) || '<p class="muted pad-y">No moves match both filters.</p>'}</div>
+    <p class="muted small" style="margin-top:14px">${MOVES.length} moves that need a wall, a bench, the floor or nothing. General exercise guidance, not medical advice: stop anything that causes pain, numbness or dizziness.</p>`;
+}
+
+function viewExercises() {
+  const seg = segHtml('lib-mode', libMode, [['lifts', 'Lifts'], ['prep', 'Mobility & posture']], 'Library section');
+  if (libMode === 'prep') return seg + viewPrep();
+  return `${seg}
     <input type="search" class="search" id="lib-q" placeholder="Search, e.g. squat or cable" value="${esc(libQ)}" aria-label="Search exercises" autocomplete="off">
     ${chipsHtml(libCat, 'lib-cat')}
     <div id="lib-list" class="list">${libListHtml(filterLib(libQ, libCat), 'lib-open')}</div>
@@ -1416,8 +1503,39 @@ function sessionPlate(s) {
   return plateStyle(pi === -1 ? (s.label || 'A').charCodeAt(0) - 65 : pi);
 }
 
+const minsText = (secs) => (secs == null ? 'no time given' : `${Math.max(1, Math.round(secs / 60))} min`);
+
+// The mobility log: finished routines and single moves, newest first.
+function viewMoveLog() {
+  if (!db.moveLog.length) {
+    return '<div class="empty"><strong>Nothing logged yet.</strong>Start a routine, or log a single move, from Exercises > Mobility & posture.</div>';
+  }
+  const weekFrom = startOfDay(new Date()) - 6 * 86400000;
+  const week = db.moveLog.filter((x) => new Date(x.at).getTime() >= weekFrom);
+  const weekMins = Math.round(week.reduce((n, x) => n + (x.secs || 0), 0) / 60);
+  const items = [...db.moveLog].reverse().map((x) => `
+    <details class="card" style="--plate:var(--plate-blue);--plate-ink:#fff">
+      <summary>
+        <div class="row">
+          <span class="disc" aria-hidden="true">${esc(x.kind.charAt(0))}</span>
+          <div class="grow">
+            <h3>${esc(x.name)}</h3>
+            <p class="muted small" style="margin:0">${dateLabel(x.at)}, ${minsText(x.secs)}${x.total > 1 ? `, ${x.done.length} of ${x.total} moves` : ''}</p>
+          </div>
+        </div>
+      </summary>
+      ${x.total > 1 ? `<ul class="cues">${x.done.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+      ${x.notes ? `<p class="small" style="margin:10px 0 0;white-space:pre-wrap">${esc(x.notes)}</p>` : ''}
+      <button type="button" class="btn small danger" style="margin-top:12px" data-action="movelog-delete" data-id="${esc(x.id)}">Delete this entry</button>
+    </details>`).join('');
+  return `
+    <p class="small" style="margin:0 0 12px">Last 7 days: <strong class="num">${week.length}</strong> session${week.length === 1 ? '' : 's'}, <span class="num">${weekMins}</span> min.</p>
+    <div class="stack">${items}</div>`;
+}
+
 function viewHistory() {
-  const seg = segHtml('history-mode', historyMode, [['sessions', 'Workouts'], ['exercises', 'Exercises']], 'History view');
+  const seg = segHtml('history-mode', historyMode, [['sessions', 'Workouts'], ['exercises', 'Exercises'], ['mobility', 'Mobility']], 'History view');
+  if (historyMode === 'mobility') return seg + viewMoveLog();
 
   if (!db.sessions.length) {
     return `${seg}<div class="empty"><strong>No workouts yet.</strong>Finish a workout and it shows up here.</div>`;
@@ -1530,7 +1648,7 @@ function viewData() {
   return `
     <section class="card">
       <h3>Backup</h3>
-      <p class="muted small" style="margin-top:4px">Your workouts, weigh-ins and food logs are stored only on this phone. Clearing browser data or losing the phone erases them unless you have a backup file. ${last}</p>
+      <p class="muted small" style="margin-top:4px">Your workouts, weigh-ins, food logs and mobility log are stored only on this phone. Clearing browser data or losing the phone erases them unless you have a backup file. ${last}</p>
       <div class="stack">
         ${canShareFiles() ? '<button type="button" class="btn primary block" data-action="share">Send backup to Drive or a chat</button>' : ''}
         <button type="button" class="btn block ${canShareFiles() ? '' : 'primary'}" data-action="export">Download backup file</button>
@@ -1558,7 +1676,7 @@ function viewData() {
 
     <section class="card" style="margin-top:14px">
       <h3>Erase everything</h3>
-      <p class="muted small" style="margin-top:4px">Deletes every workout, weigh-in and food log, and resets your program on this phone. Download a backup first.</p>
+      <p class="muted small" style="margin-top:4px">Deletes every workout, weigh-in, food log and mobility entry, and resets your program on this phone. Download a backup first.</p>
       <button type="button" class="btn danger block" data-action="erase">Erase all data</button>
     </section>
     <p class="muted small" style="text-align:center;margin-top:18px">Gym Log ${APP_VERSION}</p>`;
@@ -1754,7 +1872,75 @@ function sheetTargets() {
     </div>`;
 }
 
-const SHEETS = { exercise: sheetExercise, pick: sheetPick, food: sheetFoodPick, amount: sheetFoodAmount, newfood: sheetFoodNew, targets: sheetTargets };
+// How to do one move: steps, what to avoid, what it needs.
+function moveGuideHtml(m) {
+  return `
+    <h3 class="sub">Step by step</h3>
+    <ol class="cues">${m.how.map((c) => `<li>${esc(c)}</li>`).join('')}</ol>
+    <h3 class="sub" style="margin-top:12px">Avoid</h3>
+    <ul class="cues">${m.avoid.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>
+    <p class="muted small" style="margin:10px 0 0">Works: ${esc(m.targets.toLowerCase())}. Needs: ${esc(m.equip.toLowerCase())}.</p>`;
+}
+
+function sheetMove(s) {
+  const m = MOVE_BY_ID.get(s.id);
+  if (!m) return sheetHead('Move not found', '');
+  const video = `https://www.youtube.com/results?search_query=${encodeURIComponent(`${m.name} how to`)}`;
+  const alts = m.alts.map((id) => MOVE_BY_ID.get(id)).filter(Boolean);
+  const inRoutines = ROUTINES.filter((r) => r.moves.includes(m.id));
+  const times = db.moveLog.filter((x) => x.total === 1 ? x.name === m.name : x.done.includes(m.name)).length;
+  return `
+    ${sheetHead(m.name, `${m.type}, ${m.zone.toLowerCase()}`)}
+    <div class="sheet-in stack">
+      <p style="margin:0"><strong>${esc(m.dose)}</strong></p>
+      <section>${moveGuideHtml(m)}</section>
+      <a class="btn block" href="${video}" target="_blank" rel="noopener">Watch how on YouTube</a>
+      ${alts.length ? `<section><h3 class="sub">Alternatives</h3><div class="list">${moveListHtml(alts)}</div></section>` : ''}
+      <section class="card">
+        <h3 class="sub">Log it${times ? ` (logged ${times} time${times === 1 ? '' : 's'})` : ''}</h3>
+        <label class="field"><span>Minutes, if you timed it</span><input type="text" inputmode="decimal" id="mv-mins" placeholder="e.g. 3"></label>
+        <label class="field" style="margin-top:10px"><span>Notes</span><textarea id="mv-notes" rows="2" maxlength="500" placeholder="e.g. left hip tighter than right"></textarea></label>
+        <button type="button" class="btn primary block" style="margin-top:12px" data-action="move-log">Save to my mobility log</button>
+      </section>
+      ${inRoutines.length ? `<p class="muted small" style="margin:0">Part of: ${inRoutines.map((r) => esc(r.name)).join(', ')}.</p>` : ''}
+    </div>`;
+}
+
+// A routine is a list to follow. Before Start it is a preview. After Start a clock runs,
+// each move can be ticked, and Finish saves it to the mobility log.
+// The ticks and the clock live only in `sheet` until then.
+function sheetRoutine(s) {
+  const r = ROUTINE_BY_ID.get(s.id);
+  if (!r) return sheetHead('Routine not found', '');
+  const going = s.startedAt != null;
+  const rows = routineMoves(r).map((m, i) => `
+    <div class="step">
+      ${going
+    ? `<button type="button" class="tick" data-action="step-tick" data-id="${m.id}" aria-pressed="${s.done[m.id] === true}" aria-label="${esc(m.name)} done">✓</button>`
+    : `<span class="step-n num" aria-hidden="true">${i + 1}</span>`}
+      <details class="grow">
+        <summary><span class="li-title">${esc(m.name)}</span><span class="muted small">${esc(m.dose)}. Tap for how.</span></summary>
+        ${moveGuideHtml(m)}
+      </details>
+    </div>`).join('');
+  return `
+    ${sheetHead(r.name, `${r.when}. About ${r.mins} minutes`)}
+    <div class="sheet-in">
+      ${going
+    ? `<p class="row" style="margin:0 0 6px"><span class="grow muted small">Tick each move as you finish it.</span><span class="clock"><span class="num" id="rt-clock">${clockText(new Date(s.startedAt).toISOString())}</span></span></p>`
+    : '<button type="button" class="btn primary block" data-action="routine-start">Start routine</button>'}
+      ${rows}
+      <p class="small" style="margin:14px 0 0">${esc(r.note)}</p>
+      ${going ? `
+        <label class="field" style="margin-top:14px"><span>Notes</span><textarea id="rt-notes" rows="2" maxlength="500" placeholder="Optional"></textarea></label>
+        <button type="button" class="btn primary block" style="margin-top:12px" data-action="routine-finish">Finish and save</button>` : ''}
+    </div>`;
+}
+
+const SHEETS = {
+  exercise: sheetExercise, pick: sheetPick, food: sheetFoodPick, amount: sheetFoodAmount, newfood: sheetFoodNew, targets: sheetTargets,
+  move: sheetMove, routine: sheetRoutine,
+};
 
 function renderSheet() {
   if (!sheet) return;
@@ -1778,13 +1964,20 @@ function closeSheet() {
   sheet = null;
 }
 
+// Closing by the user (✕, backdrop, back gesture). A routine that has been started asks first.
+function userCloseSheet() {
+  if (sheet && sheet.kind === 'routine' && sheet.startedAt != null
+      && !confirm("Stop this routine? It hasn't been saved to your log.")) return;
+  closeSheet();
+}
+
 /* ------------------------------------------------------------------ */
 /* Render                                                              */
 /* ------------------------------------------------------------------ */
 
 function title() {
   if (tab === 'today') return db.active ? 'Workout in progress' : 'Today';
-  if (tab === 'exercises') return 'Exercises';
+  if (tab === 'exercises') return libMode === 'prep' ? 'Mobility and posture' : 'Exercises';
   if (tab === 'body') return bodyMode === 'weight' ? 'Body weight' : 'Food';
   if (tab === 'history') return 'History';
   return moreMode === 'program' ? 'Program' : 'Backup and settings';
@@ -1851,6 +2044,66 @@ function applyPick(name) {
 }
 
 const actions = {
+  'lib-mode': (el) => { libMode = el.dataset.mode; render(); },
+  'prep-type': (el) => { prepType = el.dataset.v; render(); },
+  'prep-zone': (el) => { prepZone = el.dataset.v; render(); },
+  'move-open': (el) => {
+    if (sheet && sheet.kind === 'routine' && sheet.startedAt != null) return; // never replace a routine in progress
+    openSheet({ kind: 'move', id: el.dataset.id });
+  },
+  'routine-open': (el) => openSheet({ kind: 'routine', id: el.dataset.id, startedAt: null, done: {} }),
+  'routine-start': () => {
+    if (!sheet || sheet.kind !== 'routine') return;
+    sheet.startedAt = Date.now();
+    renderSheet();
+  },
+  'step-tick': (el) => {
+    if (!sheet || sheet.kind !== 'routine') return;
+    const on = sheet.done[el.dataset.id] !== true;
+    sheet.done[el.dataset.id] = on;
+    el.setAttribute('aria-pressed', String(on)); // no re-render: it would close the open how-to and clear the notes
+  },
+  'routine-finish': () => {
+    const r = sheet && sheet.kind === 'routine' ? ROUTINE_BY_ID.get(sheet.id) : null;
+    if (!r || sheet.startedAt == null) return;
+    const moves = routineMoves(r);
+    const done = moves.filter((m) => sheet.done[m.id] === true).map((m) => m.name);
+    if (!done.length) { toast('Tick the moves you did first.'); return; }
+    const entry = {
+      id: uid(), at: new Date().toISOString(), name: r.name, kind: r.kind,
+      secs: Math.max(1, Math.round((Date.now() - sheet.startedAt) / 1000)),
+      done, total: moves.length, notes: ($('#rt-notes') ? $('#rt-notes').value : '').trim().slice(0, 500),
+    };
+    // If the save fails the sheet stays open with every tick, so nothing is lost.
+    if (!commit(() => { db.moveLog.push(entry); })) return;
+    closeSheet();
+    render();
+    toast(`Saved: ${done.length} of ${moves.length} moves.`);
+  },
+  'move-log': () => {
+    const m = sheet && sheet.kind === 'move' ? MOVE_BY_ID.get(sheet.id) : null;
+    if (!m) return;
+    const typed = $('#mv-mins').value.trim();
+    const mins = toNum(typed);
+    if (typed && !(mins > 0 && mins <= 600)) { toast('Minutes must be a number above 0, or empty.'); return; }
+    const entry = {
+      id: uid(), at: new Date().toISOString(), name: m.name, kind: m.type,
+      secs: typed ? Math.round(mins * 60) : null, done: [m.name], total: 1,
+      notes: $('#mv-notes').value.trim().slice(0, 500),
+    };
+    if (!commit(() => { db.moveLog.push(entry); })) return;
+    closeSheet();
+    render();
+    toast('Saved to your mobility log.');
+  },
+  'movelog-delete': (el) => {
+    const x = db.moveLog.find((y) => y.id === el.dataset.id);
+    if (!x || !confirm(`Delete "${x.name}" from ${dateLabel(x.at)}? This can't be undone.`)) return;
+    const ok = commit(() => { db.moveLog = db.moveLog.filter((y) => y.id !== x.id); });
+    render();
+    if (ok) toast('Deleted.');
+  },
+
   start: (el) => {
     if (db.active && !confirm('A workout is already in progress. Discard it and start this one?')) return;
     startWorkout(Number(el.dataset.index));
@@ -2012,7 +2265,7 @@ const actions = {
   export: () => exportBackup('download'),
   share: () => exportBackup('share'),
   erase: () => {
-    const typed = prompt('This deletes every workout, weigh-in and food log on this phone. Type ERASE to confirm.');
+    const typed = prompt('This deletes every workout, weigh-in, food log and mobility entry on this phone. Type ERASE to confirm.');
     if (typed !== 'ERASE') return;
     if (!commit(() => { db = defaultData(); })) { render(); return; }
     stopRest(); releaseWake();
@@ -2026,7 +2279,7 @@ const actions = {
     render();
   },
   'dismiss-install': () => { commit(() => { db.installTipDismissed = true; }); render(); },
-  'sheet-close': () => closeSheet(),
+  'sheet-close': () => userCloseSheet(),
 
   // Recovery and safety copies
   'recovery-download': () => {
@@ -2170,7 +2423,8 @@ function tidyProgram() {
 document.querySelector('.tabs').addEventListener('click', tidyProgram, true);
 
 // Sheet: tapping the dark backdrop closes it; so does the back gesture / Esc.
-$('#sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet') closeSheet(); });
+$('#sheet').addEventListener('click', (e) => { if (e.target.id === 'sheet') userCloseSheet(); });
+$('#sheet').addEventListener('cancel', (e) => { e.preventDefault(); userCloseSheet(); });
 $('#sheet').addEventListener('close', () => { sheet = null; });
 
 document.addEventListener('visibilitychange', () => {
@@ -2224,6 +2478,8 @@ window.addEventListener('storage', (e) => {
 setInterval(() => {
   const el = document.getElementById('wo-clock');
   if (el && db.active) el.textContent = clockText(db.active.startedAt);
+  const rt = document.getElementById('rt-clock');
+  if (rt && sheet && sheet.kind === 'routine' && sheet.startedAt != null) rt.textContent = clockText(new Date(sheet.startedAt).toISOString());
 }, 1000);
 
 /* ------------------------------------------------------------------ */

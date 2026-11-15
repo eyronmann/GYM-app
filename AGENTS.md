@@ -6,7 +6,7 @@ the gym faster, or keeps the user's data safer, wins.
 
 ## What this is
 
-A workout, body-weight and food logger for **one person**, used on a phone,
+A workout, mobility, body-weight and food logger for **one person**, used on a phone,
 often **at the gym** with poor signal. It is an installable web app (PWA)
 hosted as static files on GitHub Pages.
 
@@ -39,19 +39,21 @@ hosted as static files on GitHub Pages.
 | `index.html` | Page shell: top bar, main view, rest-timer bar, bottom sheet, tab bar |
 | `styles.css` | All styling. Colours are CSS variables at the top |
 | `app.js` | All logic: data, rotation, logging, swap, rest timer, workout clock, weight, food, history, program editor, backup |
+| `data/routines.js` | Warm-up, mobility, posture and cooldown moves (`window.MOVES`: steps, what to avoid, equipment, alternatives) and the routines built from them (`window.ROUTINES`) |
 | `data/exercises.js` | Built-in exercise library (`window.EXERCISES`): name, muscle group, equipment, form cues, alternatives |
 | `data/foods.js` | Built-in food list (`window.FOODS`): per-serving calories, protein, carbs, fat |
 | `sw.js` | Offline cache (cache first, refresh in background) |
 | `manifest.webmanifest`, `icons/` | Home-screen install |
 
-Tabs: Today (workout), Exercises (library), Body (weight and food), History,
-More (program, backup and settings).
+Tabs: Today (workout), Exercises (lifts, or mobility and posture), Body (weight
+and food), History (workouts, exercises, mobility), More (program, backup and
+settings).
 
-## Data model (`localStorage["gymlog.v1"]`, version 2)
+## Data model (`localStorage["gymlog.v1"]`, version 3)
 
 ```js
 {
-  version: 2,
+  version: 3,
   settings: { unit: 'kg', restSeconds: 90, restSound: true, keepAwake: true,
               calorieTarget: null | number, proteinTarget: null | number },
   program: [                       // order = rotation order (A, B, C, ...)
@@ -67,6 +69,12 @@ More (program, backup and settings).
   foods: [ { id: 'c-...', name, serving, kcal, p, c, f, custom: true } ],  // user's own foods
   foodLog: [ { id, date: 'YYYY-MM-DD', foodId, name, serving, qty,
                kcal, p, c, f } ],  // per-serving numbers copied at log time; total = value × qty
+  moveLog: [                       // finished routines and single moves, oldest first (added in version 3)
+    { id, at: ISO date, name, kind: 'Warm-up' | 'Mobility' | 'Posture' | 'Cooldown',
+      secs: null | number,         // null when no duration was given, never 0
+      done: [ 'Leg Swings' ],      // names of the moves ticked, copied at save time
+      total: 7,                    // moves in the routine; 1 for a single move
+      notes: '' } ],
   lastBackupAt: null | ISO date,
   installTipDismissed: false
 }
@@ -77,6 +85,11 @@ More (program, backup and settings).
   exercise gets cues and alternatives when its name matches a library name.
 - Food log entries copy the food's numbers so editing or deleting a food never
   changes past days.
+- Mobility log entries copy the routine's and moves' names for the same reason,
+  so names and ids in `data/routines.js` can change without touching history.
+- A routine in progress (its ticks, clock and notes) lives only in the open
+  sheet, not in saved data. Closing it asks first. If the save on Finish fails,
+  the sheet stays open with everything in it.
 
 ## Protecting saved data (how the code does rule 4)
 
@@ -122,6 +135,11 @@ More (program, backup and settings).
 
 ## Built-in data accuracy
 
+- `data/routines.js` moves need a wall, a bench, the floor or nothing. Every
+  move has step-by-step instructions (`how`), mistakes and safety (`avoid`),
+  what it works, equipment and a dose. Warm-up routines contain no held
+  stretches; those belong in Cooldown. It is general exercise guidance: it must
+  never claim to fix posture, cure pain or treat an injury.
 - `data/exercises.js` is limited to the owner's gym equipment: dumbbells, cable
   machine, bench press, lat pulldown, leg press, hack squat machine, leg
   extension, barbells, T-bar row.
@@ -134,9 +152,11 @@ More (program, backup and settings).
 In the app now: A/B/C rotation, logging weight × reps per set, last session's
 numbers and an "add weight" hint, swap to an alternative mid-workout, rest
 timer, running workout clock, exercise library with search by muscle group,
-form cues, alternatives and video link, body-weight log with 7-day average and
+form cues, alternatives and video link, warm-up, mobility, posture and cooldown
+moves, ten routines to start, tick off and save, a mobility log with duration
+and notes, body-weight log with 7-day average and
 chart, food log with built-in foods, own foods, daily totals and targets,
-history by workout and by exercise, program editor, JSON backup and restore.
+history by workout, by exercise and for mobility, program editor, JSON backup and restore.
 
 Not planned unless the owner asks: accounts or sync, social features, AI
 coaching, notifications, micronutrients, barcode scanning.

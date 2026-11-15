@@ -13,6 +13,12 @@ no signal, and keeps everything on the phone.
   ✓ logs it, and the rest timer starts. A clock shows how long I've been training.
 - **Swap** replaces an exercise with an alternative when a machine is taken.
 
+**Cardio** (Today → Cardio)
+- Run or walk. Start a timer and enter the distance at the end, or add a session
+  by hand: distance or speed, time, and treadmill incline.
+- Shows pace (min/km), speed (km/h) and estimated calories. Calories are an
+  estimate (ACSM equations and my latest weigh-in), off by 10 to 20 percent.
+
 **Exercises**
 - About 50 exercises for my gym's equipment, searchable and filtered by muscle
   group (legs, chest, back, shoulders, arms, core).
@@ -34,7 +40,7 @@ no signal, and keeps everything on the phone.
   *kanin* or *itlog*), pick how many servings, and see calories, protein, carbs
   and fat. Add my own foods from labels. Daily totals against my targets.
 
-**History** keeps every workout, each exercise's best set, and my mobility log.
+**History** keeps every workout, each exercise's best set, my mobility log and my cardio sessions.
 **More** has my program editor, backup and settings.
 
 ## Install it on my phone

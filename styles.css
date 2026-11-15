@@ -404,3 +404,16 @@ textarea { display: block; resize: vertical; line-height: 1.4; }
 .step summary .muted { display: block; }
 .step details[open] summary { margin-bottom: 8px; }
 ol.cues { padding-left: 22px; }
+
+/* ================= Cardio ================= */
+.huge { font-size: 3.4rem; font-weight: 800; line-height: 1; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.stats.two { grid-template-columns: 1fr 1fr; }
+.stat {
+  display: grid; justify-items: center; gap: 2px; padding: 10px 4px;
+  background: var(--mat-2); border-radius: 10px; text-align: center;
+}
+.stat .big { font-size: 1.35rem; font-weight: 750; }
+.stat.lead .big { font-size: 2rem; }
+/* Four History views fit one row at 390 px with slightly smaller labels */
+.seg:has(> :nth-child(4)) button { font-size: .9rem; padding: 0 2px; }

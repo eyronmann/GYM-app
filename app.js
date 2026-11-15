@@ -9,15 +9,15 @@
 
   Built-in data lives in data/exercises.js (window.EXERCISES),
   data/routines.js (window.MOVES, window.ROUTINES) and data/foods.js
-  (window.FOODS).
+  (window.FOODS). Cardio (runs, walks, treadmill) lives in cardio.js.
 
   Read AGENTS.md before changing this file. The data-format rules there
   are what keep old workouts readable after an update.
 */
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
-const DATA_VERSION = 3;
-const APP_VERSION = '3.0.0';
+const DATA_VERSION = 4;
+const APP_VERSION = '3.1.0';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -193,6 +193,8 @@ function defaultData() {
     foods: [],
     foodLog: [],
     moveLog: [],
+    runs: [],
+    activeRun: null,
     lastBackupAt: null,
     installTipDismissed: false,
   };
@@ -200,7 +202,7 @@ function defaultData() {
 
 const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-// Takes anything that looks like saved data (from storage or a backup file, version 1, 2 or 3)
+// Takes anything that looks like saved data (from storage or a backup file, version 1 to 4)
 // and returns a complete, current-version object.
 // - Throws an error with code 'not-ours' if it isn't Gym Log data,
 //   and code 'newer' if a newer version of the app wrote it (we must not downgrade it).
@@ -362,6 +364,40 @@ function migrate(d, report = { dropped: 0 }) {
     }))
     .sort((a, b) => new Date(a.at) - new Date(b.at));
 
+  // Added in data version 4: finished runs and walks, and the one in progress.
+  const optNum = (v) => (v === null ? null : num(v));
+  const isPoint = (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]);
+  const isRunType = (v) => v === 'run' || v === 'walk';
+  const runs = keep(list(d.runs, 4), (x) => isObj(x) && isRunType(x.type) && typeof x.treadmill === 'boolean'
+      && isDate(x.finishedAt) && isDate(x.startedAt) && isAmount(x.dist) && num(x.dist) > 0
+      && isAmount(x.secs) && num(x.secs) > 0 && isAmount(x.elapsedSecs) && isAmount(x.gapSecs)
+      && optAmount(x.incline) && optAmount(x.kcal) && optAmount(x.kg) && optAmount(x.steps) && Array.isArray(x.route))
+    .map((x) => ({
+      id: idOf(x), type: x.type, treadmill: x.treadmill, startedAt: x.startedAt, finishedAt: x.finishedAt,
+      secs: num(x.secs), elapsedSecs: num(x.elapsedSecs), dist: num(x.dist), incline: optNum(x.incline),
+      kcal: optNum(x.kcal), kg: optNum(x.kg), steps: optNum(x.steps), gapSecs: num(x.gapSecs),
+      // The route is the one part a run can lose and still be a run: a damaged stretch is left out and counted.
+      route: keep(x.route, (seg) => Array.isArray(seg) && seg.length > 1 && seg.every(isPoint)).map((seg) => seg.map((p) => [p[0], p[1]])),
+    }))
+    .sort((a, b) => new Date(a.finishedAt) - new Date(b.finishedAt));
+
+  let activeRun = null;
+  if (d.activeRun != null) {
+    const a = d.activeRun;
+    if (isObj(a) && isRunType(a.type) && typeof a.gps === 'boolean' && isDate(a.startedAt) && Array.isArray(a.pts)
+        && typeof a.paused === 'boolean' && isAmount(a.dist) && isAmount(a.activeMs) && isAmount(a.stoppedMs)
+        && isAmount(a.gapMs) && isAmount(a.steps) && optAmount(a.kg) && optAmount(a.firstAt) && optAmount(a.lastResumeAt)) {
+      activeRun = {
+        id: idOf(a), type: a.type, gps: a.gps, startedAt: a.startedAt,
+        firstAt: optNum(a.firstAt), lastResumeAt: optNum(a.lastResumeAt),
+        activeMs: num(a.activeMs), stoppedMs: num(a.stoppedMs), paused: a.paused,
+        breakNext: a.breakNext === true, recovered: a.recovered === true,
+        dist: num(a.dist), gapMs: num(a.gapMs), steps: num(a.steps), kg: optNum(a.kg),
+        pts: keep(a.pts, (p) => isPoint(p) && Number.isFinite(p[2])).map((p) => (p[3] ? [p[0], p[1], p[2], 1] : [p[0], p[1], p[2]])),
+      };
+    } else problem();
+  }
+
   let lastBackupAt = null;
   if (d.lastBackupAt != null) {
     if (isDate(d.lastBackupAt)) lastBackupAt = d.lastBackupAt;
@@ -378,6 +414,8 @@ function migrate(d, report = { dropped: 0 }) {
     foods,
     foodLog,
     moveLog,
+    runs,
+    activeRun,
     lastBackupAt,
     installTipDismissed: d.installTipDismissed === true,
   };
@@ -571,6 +609,7 @@ let tab = 'today';
 let historyMode = 'sessions';
 let bodyMode = 'weight';
 let moreMode = 'program';
+let todayMode = 'lift';   // Today shows lifting or cardio
 let libMode = 'lifts';    // Exercises shows lifts, or warm-up, mobility, posture and cooldown moves
 let prepType = 'All';
 let prepZone = 'All';
@@ -662,6 +701,7 @@ function newEntry(name, sets, reps) {
 function startWorkout(index) {
   const w = db.program[index];
   if (!w) return;
+  if (db.activeRun) { toast('Finish or discard your cardio session first.'); return; }
   const ok = commit(() => {
     db.active = {
       id: uid(),
@@ -1016,7 +1056,7 @@ function importBackup(file) {
     }
     if (report.dropped > 0 && !confirm(`This backup has ${report.dropped} problem${report.dropped === 1 ? '' : 's'}: damaged records would be left out or repaired. Import it anyway?`)) return;
     const n = data.sessions.length;
-    if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'}, ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'} and ${data.moveLog.length} mobility entr${data.moveLog.length === 1 ? 'y' : 'ies'}.`)) return;
+    if (!confirm(`Replace everything on this phone with this backup? It has ${n} workout${n === 1 ? '' : 's'}, ${data.bodyweights.length} weigh-in${data.bodyweights.length === 1 ? '' : 's'}, ${data.foodLog.length} food entr${data.foodLog.length === 1 ? 'y' : 'ies'}, ${data.moveLog.length} mobility entr${data.moveLog.length === 1 ? 'y' : 'ies'} and ${data.runs.length} cardio session${data.runs.length === 1 ? '' : 's'}.`)) return;
 
     // Keep an untouched copy of what is being replaced. No copy, no import.
     let current = null;
@@ -1163,7 +1203,7 @@ function noticesHtml() {
       </div>`);
   }
 
-  const total = db.sessions.length + db.foodLog.length + db.bodyweights.length + db.moveLog.length;
+  const total = db.sessions.length + db.foodLog.length + db.bodyweights.length + db.moveLog.length + db.runs.length;
   if (total >= 5 && daysSince(db.lastBackupAt) > 14) {
     const when = db.lastBackupAt ? `Last backup ${ago(db.lastBackupAt)}.` : 'You have never backed up.';
     out.push(`
@@ -1534,8 +1574,9 @@ function viewMoveLog() {
 }
 
 function viewHistory() {
-  const seg = segHtml('history-mode', historyMode, [['sessions', 'Workouts'], ['exercises', 'Exercises'], ['mobility', 'Mobility']], 'History view');
+  const seg = segHtml('history-mode', historyMode, [['sessions', 'Workouts'], ['exercises', 'Exercises'], ['mobility', 'Mobility'], ['cardio', 'Cardio']], 'History view');
   if (historyMode === 'mobility') return seg + viewMoveLog();
+  if (historyMode === 'cardio') return seg + viewRunHistory();
 
   if (!db.sessions.length) {
     return `${seg}<div class="empty"><strong>No workouts yet.</strong>Finish a workout and it shows up here.</div>`;
@@ -1648,7 +1689,7 @@ function viewData() {
   return `
     <section class="card">
       <h3>Backup</h3>
-      <p class="muted small" style="margin-top:4px">Your workouts, weigh-ins, food logs and mobility log are stored only on this phone. Clearing browser data or losing the phone erases them unless you have a backup file. ${last}</p>
+      <p class="muted small" style="margin-top:4px">Your workouts, cardio, weigh-ins, food logs and mobility log are stored only on this phone. Clearing browser data or losing the phone erases them unless you have a backup file. ${last}</p>
       <div class="stack">
         ${canShareFiles() ? '<button type="button" class="btn primary block" data-action="share">Send backup to Drive or a chat</button>' : ''}
         <button type="button" class="btn block ${canShareFiles() ? '' : 'primary'}" data-action="export">Download backup file</button>
@@ -1676,7 +1717,7 @@ function viewData() {
 
     <section class="card" style="margin-top:14px">
       <h3>Erase everything</h3>
-      <p class="muted small" style="margin-top:4px">Deletes every workout, weigh-in, food log and mobility entry, and resets your program on this phone. Download a backup first.</p>
+      <p class="muted small" style="margin-top:4px">Deletes every workout, cardio session, weigh-in, food log and mobility entry, and resets your program on this phone. Download a backup first.</p>
       <button type="button" class="btn danger block" data-action="erase">Erase all data</button>
     </section>
     <p class="muted small" style="text-align:center;margin-top:18px">Gym Log ${APP_VERSION}</p>`;
@@ -1939,7 +1980,7 @@ function sheetRoutine(s) {
 
 const SHEETS = {
   exercise: sheetExercise, pick: sheetPick, food: sheetFoodPick, amount: sheetFoodAmount, newfood: sheetFoodNew, targets: sheetTargets,
-  move: sheetMove, routine: sheetRoutine,
+  move: sheetMove, routine: sheetRoutine, cardio: sheetCardio,
 };
 
 function renderSheet() {
@@ -1976,7 +2017,11 @@ function userCloseSheet() {
 /* ------------------------------------------------------------------ */
 
 function title() {
-  if (tab === 'today') return db.active ? 'Workout in progress' : 'Today';
+  if (tab === 'today') {
+    if (db.active) return 'Workout in progress';
+    if (db.activeRun) return `${RUN_NAMES[db.activeRun.type]} in progress`;
+    return todayMode === 'cardio' ? 'Cardio' : 'Today';
+  }
   if (tab === 'exercises') return libMode === 'prep' ? 'Mobility and posture' : 'Exercises';
   if (tab === 'body') return bodyMode === 'weight' ? 'Body weight' : 'Food';
   if (tab === 'history') return 'History';
@@ -1987,10 +2032,17 @@ function render() {
   document.querySelectorAll('.tabs button').forEach((b) => {
     if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
-    b.classList.toggle('live', b.dataset.tab === 'today' && !!db.active);
+    b.classList.toggle('live', b.dataset.tab === 'today' && !!(db.active || db.activeRun));
   });
   let html = '';
-  if (tab === 'today') html = db.active ? viewWorkout() : viewToday();
+  if (tab === 'today') {
+    if (db.active) html = viewWorkout();
+    else if (db.activeRun) html = viewRun();
+    else {
+      html = segHtml('today-mode', todayMode, [['lift', 'Lift'], ['cardio', 'Cardio']], 'Today section')
+        + (todayMode === 'cardio' ? viewCardio() : viewToday());
+    }
+  }
   else if (tab === 'exercises') html = viewExercises();
   else if (tab === 'body') html = viewBody();
   else if (tab === 'history') html = viewHistory();
@@ -2044,6 +2096,8 @@ function applyPick(name) {
 }
 
 const actions = {
+  ...CARDIO_ACTIONS,
+  'today-mode': (el) => { todayMode = el.dataset.mode; render(); },
   'lib-mode': (el) => { libMode = el.dataset.mode; render(); },
   'prep-type': (el) => { prepType = el.dataset.v; render(); },
   'prep-zone': (el) => { prepZone = el.dataset.v; render(); },
@@ -2265,7 +2319,7 @@ const actions = {
   export: () => exportBackup('download'),
   share: () => exportBackup('share'),
   erase: () => {
-    const typed = prompt('This deletes every workout, weigh-in, food log and mobility entry on this phone. Type ERASE to confirm.');
+    const typed = prompt('This deletes every workout, cardio session, weigh-in, food log and mobility entry on this phone. Type ERASE to confirm.');
     if (typed !== 'ERASE') return;
     if (!commit(() => { db = defaultData(); })) { render(); return; }
     stopRest(); releaseWake();
@@ -2490,5 +2544,6 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+if (db.activeRun) todayMode = 'cardio';
 render();
 if (db.active) keepAwake();

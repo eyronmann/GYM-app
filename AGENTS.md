@@ -6,7 +6,7 @@ the gym faster, or keeps the user's data safer, wins.
 
 ## What this is
 
-A workout, mobility, body-weight and food logger for **one person**, used on a phone,
+A workout, cardio, mobility, body-weight and food logger for **one person**, used on a phone,
 often **at the gym** with poor signal. It is an installable web app (PWA)
 hosted as static files on GitHub Pages.
 
@@ -39,21 +39,22 @@ hosted as static files on GitHub Pages.
 | `index.html` | Page shell: top bar, main view, rest-timer bar, bottom sheet, tab bar |
 | `styles.css` | All styling. Colours are CSS variables at the top |
 | `app.js` | All logic: data, rotation, logging, swap, rest timer, workout clock, weight, food, history, program editor, backup |
+| `cardio.js` | Runs and walks: timer, by-hand entry (treadmill), pace, speed, calorie estimate, the cardio screens. Loaded before `app.js` and uses its helpers inside functions |
 | `data/routines.js` | Warm-up, mobility, posture and cooldown moves (`window.MOVES`: steps, what to avoid, equipment, alternatives) and the routines built from them (`window.ROUTINES`) |
 | `data/exercises.js` | Built-in exercise library (`window.EXERCISES`): name, muscle group, equipment, form cues, alternatives |
 | `data/foods.js` | Built-in food list (`window.FOODS`): per-serving calories, protein, carbs, fat |
 | `sw.js` | Offline cache (cache first, refresh in background) |
 | `manifest.webmanifest`, `icons/` | Home-screen install |
 
-Tabs: Today (workout), Exercises (lifts, or mobility and posture), Body (weight
-and food), History (workouts, exercises, mobility), More (program, backup and
-settings).
+Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
+(weight and food), History (workouts, exercises, mobility, cardio), More
+(program, backup and settings).
 
-## Data model (`localStorage["gymlog.v1"]`, version 3)
+## Data model (`localStorage["gymlog.v1"]`, version 4)
 
 ```js
 {
-  version: 3,
+  version: 4,
   settings: { unit: 'kg', restSeconds: 90, restSound: true, keepAwake: true,
               calorieTarget: null | number, proteinTarget: null | number },
   program: [                       // order = rotation order (A, B, C, ...)
@@ -75,6 +76,22 @@ settings).
       done: [ 'Leg Swings' ],      // names of the moves ticked, copied at save time
       total: 7,                    // moves in the routine; 1 for a single move
       notes: '' } ],
+  runs: [                          // finished runs and walks, oldest first (added in version 4)
+    { id, type: 'run' | 'walk', treadmill: true | false, startedAt, finishedAt,
+      secs,                        // moving time: pace, speed and calories use this
+      elapsedSecs,                 // start to finish on the wall clock, pauses and stops included
+      dist,                        // metres
+      incline: null | number,      // percent, treadmill only
+      kcal: null | number,         // estimate, copied at save time; null if there was no weigh-in
+      kg: null | number,           // the body weight the estimate used
+      steps: null | number,        // null when steps were not counted
+      gapSecs,                     // time with no GPS signal; 0 for by-hand and timed sessions
+      route: [ [ [lat, lng], ... ] ] }   // GPS track, one array per stretch; [] without GPS
+  ],
+  activeRun: null | { id, type, gps: true | false, startedAt,
+                      firstAt, lastResumeAt,     // ms; null until the clock starts / while paused
+                      activeMs, stoppedMs, paused, breakNext, recovered,
+                      dist, gapMs, steps, kg, pts: [ [lat, lng, timeMs] ] },
   lastBackupAt: null | ISO date,
   installTipDismissed: false
 }
@@ -87,6 +104,10 @@ settings).
   changes past days.
 - Mobility log entries copy the routine's and moves' names for the same reason,
   so names and ids in `data/routines.js` can change without touching history.
+- A lifting workout and a cardio session can't be in progress at the same time.
+- A timed cardio session (`gps: false`) runs on the wall clock, so it keeps
+  counting through a locked phone or a reload. Finish pauses it and opens the
+  by-hand form; the session is cleared only when that form saves.
 - A routine in progress (its ticks, clock and notes) lives only in the open
   sheet, not in saved data. Closing it asks first. If the save on Finish fails,
   the sheet stays open with everything in it.
@@ -110,7 +131,8 @@ settings).
 - `migrate()` rejects data with an unknown or newer `version`, and counts every
   record it can't read in `report.dropped`; callers keep a copy or ask first.
   A list that is missing or isn't a list counts too (program and sessions always;
-  bodyweights, foods and foodLog from version 2), and so does a damaged number:
+  bodyweights, foods and foodLog from version 2, moveLog from version 3, runs
+  from version 4), and so does a damaged number:
   it is never turned into 0. Repaired fields (a missing id, a bad set count,
   a missing version) are counted as well. A set's weight must be a number or
   `null` (bodyweight); a missing weight is damage, not bodyweight. Data the app
@@ -140,6 +162,9 @@ settings).
   what it works, equipment and a dose. Warm-up routines contain no held
   stretches; those belong in Cooldown. It is general exercise guidance: it must
   never claim to fix posture, cure pain or treat an injury.
+- Cardio calories use the ACSM walking and running equations (with treadmill
+  incline as grade, 0 outdoors) and the latest weigh-in. They are labelled
+  "est." everywhere and must stay that way. No weigh-in means no number, not a guess.
 - `data/exercises.js` is limited to the owner's gym equipment: dumbbells, cable
   machine, bench press, lat pulldown, leg press, hack squat machine, leg
   extension, barbells, T-bar row.
@@ -154,9 +179,10 @@ numbers and an "add weight" hint, swap to an alternative mid-workout, rest
 timer, running workout clock, exercise library with search by muscle group,
 form cues, alternatives and video link, warm-up, mobility, posture and cooldown
 moves, ten routines to start, tick off and save, a mobility log with duration
-and notes, body-weight log with 7-day average and
+and notes, cardio (run and walk timer, by-hand treadmill entry with distance,
+time, speed and incline, pace, speed, estimated calories), body-weight log with 7-day average and
 chart, food log with built-in foods, own foods, daily totals and targets,
-history by workout, by exercise and for mobility, program editor, JSON backup and restore.
+history by workout, by exercise, for mobility and for cardio, program editor, JSON backup and restore.
 
 Not planned unless the owner asks: accounts or sync, social features, AI
 coaching, notifications, micronutrients, barcode scanning.

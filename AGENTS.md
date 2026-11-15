@@ -99,6 +99,17 @@ Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
 }
 ```
 
+Data versions, and what each added. A file of any older version loads into the
+current one through `migrate()` with its existing records unchanged; lists a
+version didn't have yet start empty and are not counted as damage.
+
+| Version | Added |
+|---|---|
+| 1 | `settings`, `program`, `sessions`, `active` |
+| 2 | `bodyweights`, `foods`, `foodLog`, calorie and protein targets |
+| 3 | `moveLog` |
+| 4 | `runs`, `activeRun` |
+
 - Exercise history is matched by `key` (lower-cased name), so the same exercise in
   two workouts shares one history. The library is linked the same way: an
   exercise gets cues and alternatives when its name matches a library name.
@@ -165,21 +176,57 @@ Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
 - Restoring a backup aborts if the current data can't be read; a failed read is
   never treated as an empty phone.
 
+The mobility log and cardio follow the same rules. In particular:
+
+- Backup files and safety copies are the whole saved object, so they include
+  `moveLog`, every run with its route, and any session in progress. Nothing
+  about them is stored anywhere else.
+- A failed save never drops work in progress: a routine's sheet stays open with
+  its ticks and notes, the cardio form stays open with its timer still paused,
+  and a GPS run stays in progress. None of them shows a success message.
+- GPS points recorded since the last 10-second save exist only in memory. While
+  that is so, `unsaved` is true, which makes the other-window check keep this
+  window's copy (reason `other-window`) before it reloads. The run then comes
+  back paused from what was saved; the copy is not merged in automatically.
+- Leaving the app (`visibilitychange` to hidden) saves a GPS run at once.
+- Restoring a backup that holds an unpaused GPS run brings it back paused.
+- In recovery mode nothing can be started or saved, including runs, timers and
+  routines, because `commit()` fails. That is intended.
+- Deleting a run, only its route, or a mobility entry goes through `commit()`
+  and changes that one record only.
+
 ## Cardio: limits of a web app
 
 Don't promise or "fix" these. They are limits of a web page with no backend.
 
-- GPS stops when the phone is locked or another app is in front. A GPS run
-  keeps the screen awake (Wake Lock; a notice appears where the browser lacks
-  it), and the in-app "Lock screen" stops pocket touches. Background tracking
-  needs a native app. Gaps are recorded in `gapSecs` and shown, and the distance
-  across a gap is the straight line between the fixes.
+Location privacy: GPS positions are rounded to 5 decimal places (about 1 m),
+kept in `localStorage`, and leave the phone only inside a backup file or safety
+copy the owner exports. The backup screen says the file shows where he runs.
+`cardio.js` makes no network requests and builds no links from coordinates.
+
+- GPS stops when the phone is locked or another app is in front, on Android
+  Chrome and iPhone Safari alike. A GPS run keeps the screen awake with the
+  Screen Wake Lock API, and the in-app "Lock screen" stops pocket touches.
+  Background tracking needs a native app.
+- The wake lock can be refused even where the API exists: iPhone Safari has it
+  from iOS 16.4, but apps added to the Home Screen only got a working one in
+  iOS 18.4. So the run screen shows a warning whenever the API is missing *or* a
+  request was refused (`wakeRefused`), telling the owner to lengthen the phone's
+  screen timeout. Keep that check on the request's result, not on the API existing.
+- A run is not paused automatically when the app goes to the background. The
+  clock keeps running, the missing time is recorded in `gapSecs` and shown, and
+  the distance across the gap is the straight line between the fixes on either
+  side (the least that was covered). If the position didn't change, the gap
+  counts as standing still. If the browser closes the app instead, the run comes
+  back paused at its last recorded point.
 - No street map and no directions. The route is drawn as an SVG from the
   recorded points on a plain background, with a scale bar and north up. A real
   map needs online tiles (which would be sent the user's position) or a map
   database far too large for this app; routing needs a road graph on top.
 - Location and motion permission are requested only when a GPS run is started
-  or resumed, never at startup.
+  or resumed, never at startup. Where the browser has
+  `DeviceMotionEvent.requestPermission` (iPhone Safari does) it is called from
+  that tap; if it is refused the run works without steps.
 - There is no step-counter API. During a GPS run, steps are counted from the
   motion sensor (`devicemotion`) and saved only when the count works out to
   60 to 210 steps a minute over the moving time; otherwise `steps` is `null`
@@ -193,9 +240,11 @@ Don't promise or "fix" these. They are limits of a web page with no backend.
   that is larger, is treated as jitter; anything faster than 8 m/s is a jump and
   is dropped; no progress for 15 s followed by less than 0.5 m/s counts as
   standing still and is left out of moving time.
-- Tested only in desktop Chrome at 390 px with simulated GPS. Behaviour on a
-  real phone (time to first fix, drift between buildings, battery use, iPhone
-  Safari's wake lock) is not verified until the owner tries it.
+- Tested only in desktop Chrome at 390 px with simulated GPS and simulated
+  motion events. Nothing here has run on a physical phone. Time to first fix,
+  drift between buildings, battery use, the wake lock on iPhone, and whether the
+  step thresholds suit a phone in a pocket or armband are all unverified until
+  the owner tries them. The step thresholds in `onMotion` are a first guess.
 
 ## Built-in data accuracy
 

@@ -17,7 +17,9 @@ no signal, and keeps everything on the phone.
 - **Outdoors, GPS:** tracks distance, moving and elapsed time, current and
   average pace and speed, and draws my route. Pause, resume, finish.
 - **The screen must stay on with the app open.** A locked phone stops the
-  tracking. Tap **Lock screen** before pocketing the phone.
+  tracking. Tap **Lock screen** before pocketing the phone. If the phone won't
+  let the app keep the screen on (iPhones before iOS 18.4, in the Home Screen
+  app), the run screen warns me to lengthen the screen timeout first.
 - There is no street map and there are no directions: the route is drawn on a
   plain background, with the straight-line distance and direction back to where
   I started. My location is never sent anywhere.

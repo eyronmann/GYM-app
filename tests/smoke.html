@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gym Log browser smoke test</title>
+<style>
+  body { font: 16px/1.45 system-ui, sans-serif; margin: 16px; max-width: 760px; color: #1c1b19; background: #f6f4ef; }
+  h1 { font-size: 1.3rem; margin: 0 0 8px; }
+  li { margin: 4px 0; }
+  .ok { color: #1f7a33; font-weight: 700; }
+  .fail { color: #b3261e; font-weight: 700; }
+  pre { white-space: pre-wrap; margin: 2px 0 8px; color: #b3261e; }
+  #result { font-size: 1.15rem; font-weight: 700; }
+  iframe { width: 390px; height: 844px; border: 1px solid #999; display: block; margin-top: 12px; }
+  .note { color: #555; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Gym Log browser smoke test</h1>
+<p class="note">
+  Presses the app's real buttons in a real browser, so it checks what <code>node tests/run.js</code> cannot:
+  that taps reach the right code. It opens the app in the frame below, 390 px wide.<br>
+  <strong>It cannot touch your saved data.</strong> Before any app file loads, the frame's storage is replaced
+  with an empty one in memory, the test stops if that replacement is not in place, and at the end it checks that
+  this browser's real saved data is exactly as it was. GPS, the clock and the confirm boxes are stand-ins too.<br>
+  To run it: in the repo folder run <code>python -m http.server 8000</code>, then open
+  <code>http://localhost:8000/tests/smoke.html</code>. It runs by itself and takes a few seconds.
+  It does not test a physical phone, real GPS, or the layout rules.
+</p>
+<p id="result">Running…</p>
+<ol id="log"></ol>
+<div id="stage"></div>
+
+<script>
+'use strict';
+const ROOT = new URL('../', location.href).href;
+const SCRIPTS = ['data/exercises.js', 'data/routines.js', 'data/foods.js', 'cardio.js', 'app.js'];
+const KEY = 'gymlog.v1';
+
+/* Runs inside the app's frame before any app file. Everything the app could use to reach
+   the outside world, or this browser's real storage, is replaced here. */
+const SETUP = `(() => {
+  class FakeStorage {
+    constructor() { this.map = new Map(); this.failPrefix = null; }
+    get length() { return this.map.size; }
+    key(i) { return [...this.map.keys()][i] ?? null; }
+    getItem(k) { return this.map.has(k) ? this.map.get(k) : null; }
+    setItem(k, v) { if (this.failPrefix !== null && String(k).startsWith(this.failPrefix)) throw new Error('QuotaExceededError'); this.map.set(String(k), String(v)); }
+    removeItem(k) { this.map.delete(k); }
+  }
+  const local = new FakeStorage();
+  const session = new FakeStorage();
+  Object.defineProperty(window, 'localStorage', { value: local, configurable: true });
+  Object.defineProperty(window, 'sessionStorage', { value: session, configurable: true });
+
+  const RealDate = Date;
+  const clock = { ahead: 0 };            // the test moves time forward by adding to this
+  window.Date = class extends RealDate {
+    constructor(...a) { if (a.length) super(...a); else super(RealDate.now() + clock.ahead); }
+    static now() { return RealDate.now() + clock.ahead; }
+  };
+
+  const geo = { watching: false, starts: 0, ok: null };
+  Object.defineProperty(navigator, 'geolocation', { configurable: true, value: {
+    watchPosition(ok) { geo.watching = true; geo.starts += 1; geo.ok = ok; return geo.starts; },
+    clearWatch() { geo.watching = false; },
+  } });
+  Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: {
+    request: () => Promise.resolve({ addEventListener() {}, release() {} }),
+  } });
+
+  const t = { local, session, clock, geo, confirms: [], answer: true };
+  window.confirm = (m) => { t.confirms.push(String(m)); return t.answer; };
+  window.prompt = () => null;
+  window.alert = () => {};
+  window.__t = t;
+})();`;
+
+/* ---------- sample data (version 2: what is on the phone before this branch) ---------- */
+const V2 = {
+  version: 2, settings: { unit: 'kg', restSeconds: 90, restSound: false, keepAwake: true, calorieTarget: 2400, proteinTarget: 100 },
+  program: [
+    { id: 'w1', name: 'Legs', exercises: [{ id: 'e1', name: 'Hack Squat', sets: 2, reps: '5-6' }] },
+    { id: 'w2', name: 'Push', exercises: [{ id: 'e2', name: 'Bench Press', sets: 2, reps: '6-8' }] },
+  ],
+  sessions: [{ id: 's1', workoutId: 'w2', label: 'B', name: 'Push', startedAt: '2026-11-10T08:00:00.000Z', finishedAt: '2026-11-10T09:00:00.000Z',
+    entries: [{ key: 'bench press', name: 'Bench Press', targetSets: 2, targetReps: '6-8', sets: [{ w: 60, r: 6 }] }] }],
+  active: null, bodyweights: [{ id: 'b1', date: '2026-11-14', w: 50 }], foods: [], foodLog: [],
+  lastBackupAt: null, installTipDismissed: true,
+};
+
+let SHELL = '';
+const stage = document.getElementById('stage');
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const check = (cond, msg) => { if (!cond) throw new Error(msg); };
+
+/* Open the app in a fresh frame with the given saved data. Returns handles for pressing its buttons. */
+async function openApp(stored, opts = {}) {
+  stage.innerHTML = '';
+  const frame = document.createElement('iframe');
+  frame.title = 'Gym Log under test';
+  await new Promise((r) => { frame.addEventListener('load', r, { once: true }); stage.appendChild(frame); });
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  win.eval(SETUP);
+  const t = win.__t;
+  // The safety check: no app file is loaded unless the frame is using the fake storage.
+  if (win.localStorage !== t.local || win.sessionStorage !== t.session) throw new Error('Fake storage is not in place. Stopped before any app code ran.');
+  if (stored) t.local.map.set(KEY, typeof stored === 'string' ? stored : JSON.stringify(stored));
+  if (opts.noRoomForCopies) t.local.failPrefix = `${KEY}.`;
+  doc.head.innerHTML = `<meta name="viewport" content="width=device-width, initial-scale=1"><base href="${ROOT}"><link rel="stylesheet" href="styles.css">`;
+  doc.body.innerHTML = SHELL;
+  for (const src of SCRIPTS) {
+    await new Promise((resolve, reject) => {
+      const s = doc.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`Could not load ${src}`));
+      doc.body.appendChild(s);
+    });
+  }
+  let lat = 18.055;
+  const app = {
+    win, doc, t,
+    all: (sel) => [...doc.querySelectorAll(sel)],
+    has: (sel) => !!doc.querySelector(sel),
+    // A real click on a real element. The app hears it through its own document-level listener.
+    click(sel, nth = 0) {
+      const el = doc.querySelectorAll(sel)[nth];
+      check(el, `Nothing to tap for ${sel}`);
+      check(!el.disabled, `${sel} is disabled`);
+      el.click();
+    },
+    type(sel, value) {
+      const el = doc.querySelector(sel);
+      check(el, `No box for ${sel}`);
+      el.value = value;
+      el.dispatchEvent(new win.Event('input', { bubbles: true }));
+      el.dispatchEvent(new win.Event('change', { bubbles: true }));
+    },
+    screen: () => doc.getElementById('view').textContent.replace(/\s+/g, ' '),
+    sheetText: () => doc.getElementById('sheet-body').textContent.replace(/\s+/g, ' '),
+    sheetOpen: () => doc.getElementById('sheet').open,
+    title: () => doc.getElementById('title').textContent,
+    saved: () => JSON.parse(t.local.getItem(KEY)),
+    rawSaved: () => t.local.getItem(KEY),
+    forward(ms) { t.clock.ahead += ms; },
+    // One GPS fix `north` metres further on, `secs` later.
+    fix(north = 3, secs = 1) {
+      lat += north / 111195;
+      t.clock.ahead += secs * 1000;
+      if (t.geo.watching) t.geo.ok({ coords: { latitude: lat, longitude: 120.565, accuracy: 8 } });
+    },
+    visibility(state) {
+      Object.defineProperty(doc, 'visibilityState', { value: state, configurable: true });
+      doc.dispatchEvent(new win.Event('visibilitychange'));
+    },
+  };
+  return app;
+}
+
+/* ---------- the scenarios ---------- */
+const scenarios = [];
+const scenario = (name, fn) => scenarios.push([name, fn]);
+
+scenario('Tabs and the Lift / Cardio switch respond to taps', async () => {
+  const a = await openApp(V2);
+  check(a.title() === 'Today', `title is ${a.title()}`);
+  a.click('.tabs button[data-tab="history"]');
+  check(a.title() === 'History', 'History tab');
+  check(a.all('.seg button').length === 4, 'History has four views');
+  a.click('[data-action="history-mode"][data-mode="cardio"]');
+  check(a.screen().includes('No cardio yet'), 'empty cardio history');
+  a.click('.tabs button[data-tab="today"]');
+  a.click('[data-action="today-mode"][data-mode="cardio"]');
+  check(a.title() === 'Cardio', 'Cardio screen');
+  check(a.t.geo.starts === 0, 'location was not asked for just by opening Cardio');
+});
+
+scenario('Lifting still works by tapping: start, type a set, tick it, finish', async () => {
+  const a = await openApp(V2);
+  a.click('[data-action="start"]');
+  check(a.title() === 'Workout in progress', 'workout started');
+  a.type('input[data-field="w"]', '62.5');
+  a.type('input[data-field="r"]', '6');
+  a.click('[data-action="tick"]');
+  a.click('[data-action="finish"]');
+  const s = a.saved().sessions;
+  check(s.length === 2, `sessions saved: ${s.length}`);
+  check(JSON.stringify(s[1].entries[0].sets) === JSON.stringify([{ w: 62.5, r: 6 }]), `set saved as ${JSON.stringify(s[1].entries[0].sets)}`);
+  check(JSON.stringify(s[0]) === JSON.stringify(V2.sessions[0]), 'the old workout is unchanged');
+  check(a.saved().version === 4, 'saved as version 4');
+});
+
+scenario('Routine: open from the library, start, tick, notes, finish, see it in History, delete it', async () => {
+  const a = await openApp(V2);
+  a.click('.tabs button[data-tab="exercises"]');
+  a.click('[data-action="lib-mode"][data-mode="prep"]');
+  a.click('[data-action="prep-type"][data-v="Posture"]');
+  check(a.all('#view [data-action="move-open"]').length === 8, 'Posture filter shows 8 moves');
+  a.click('[data-action="routine-open"][data-id="posture"]');
+  check(a.sheetOpen() && a.sheetText().includes('Posture routine'), 'routine sheet opened');
+  check(!a.has('.step .tick'), 'no ticks before Start');
+  a.click('[data-action="routine-start"]');
+  a.click('.step .tick', 0);
+  a.click('.step .tick', 2);
+  a.click('.step summary', 1);                       // open a how-to: must not disturb the ticks
+  check(a.all('.step .tick[aria-pressed="true"]').length === 2, 'two ticks stay pressed');
+  a.type('#rt-notes', 'neck stiff');
+  a.t.answer = false;
+  a.click('[data-action="sheet-close"]');            // closing a started routine asks first
+  check(a.sheetOpen() && a.t.confirms.some((m) => m.includes('Stop this routine')), 'asked before closing');
+  a.t.answer = true;
+  a.forward(240000);
+  a.click('[data-action="routine-finish"]');
+  check(!a.sheetOpen(), 'sheet closed after saving');
+  const log = a.saved().moveLog;
+  check(log.length === 1 && log[0].done.length === 2 && log[0].notes === 'neck stiff' && log[0].secs >= 240, `saved entry: ${JSON.stringify(log)}`);
+  a.click('.tabs button[data-tab="history"]');
+  a.click('[data-action="history-mode"][data-mode="mobility"]');
+  check(a.screen().includes('Posture routine') && a.screen().includes('2 of 8 moves'), 'shown in History');
+  a.click('details.card summary');
+  a.click('[data-action="movelog-delete"]');
+  check(a.saved().moveLog.length === 0 && a.saved().sessions.length === 1, 'deleted, workouts untouched');
+});
+
+scenario('Single move: open, log minutes and notes', async () => {
+  const a = await openApp(V2);
+  a.click('.tabs button[data-tab="exercises"]');
+  a.click('[data-action="lib-mode"][data-mode="prep"]');
+  a.click('[data-action="prep-zone"][data-v="Wrists"]');
+  a.click('#view [data-action="move-open"]');
+  check(a.sheetText().includes('Step by step') && a.sheetText().includes('Avoid'), 'move sheet shows how and what to avoid');
+  a.type('#mv-mins', 'abc');
+  a.click('[data-action="move-log"]');
+  check(a.saved().moveLog === undefined || a.saved().moveLog.length === 0, 'bad minutes are refused');
+  a.type('#mv-mins', '2.5');
+  a.type('#mv-notes', 'right wrist');
+  a.click('[data-action="move-log"]');
+  const e = a.saved().moveLog[0];
+  check(e.secs === 150 && e.total === 1 && e.notes === 'right wrist', `saved ${JSON.stringify(e)}`);
+});
+
+scenario('Treadmill: timer, Finish opens the form, save, then delete from History', async () => {
+  const a = await openApp(V2);
+  a.click('[data-action="today-mode"][data-mode="cardio"]');
+  a.click('[data-action="run-where"][data-mode="timer"]');
+  a.click('[data-action="run-start-timer"]');
+  check(a.title() === 'Run in progress', 'timer started');
+  check(a.t.geo.starts === 0, 'a treadmill timer does not ask for location');
+  a.forward(600000);
+  a.click('[data-action="run-pause"]');
+  check(a.has('[data-action="run-resume"]'), 'Pause turned into Resume');
+  a.click('[data-action="run-resume"]');
+  a.click('[data-action="run-finish"]');
+  check(a.sheetOpen() && a.doc.getElementById('cd-min').value === '10', 'form opened with the timer\'s minutes');
+  a.click('[data-action="cardio-save"]');
+  check(a.saved().runs.length === 0 && a.sheetOpen(), 'refused without a distance');
+  a.type('#cd-km', '2');
+  a.type('#cd-incline', '1');
+  a.click('[data-action="cardio-save"]');
+  const x = a.saved().runs[0];
+  check(x && x.dist === 2000 && x.secs === 600 && x.treadmill === true && x.incline === 1 && x.kcal > 0, `saved ${JSON.stringify(x)}`);
+  check(a.saved().activeRun === null && !a.sheetOpen(), 'timer cleared');
+  check(a.screen().includes('2.00') && a.screen().includes('kcal (est.)'), 'shown with calories marked est.');
+  a.click('.tabs button[data-tab="history"]');
+  a.click('[data-action="history-mode"][data-mode="cardio"]');
+  a.click('details[data-run] summary');
+  a.click('[data-action="run-delete"]');
+  check(a.saved().runs.length === 0 && a.saved().sessions.length === 1, 'run deleted, workouts untouched');
+});
+
+scenario('Outdoor run: Start asks for location, fixes add distance, Pause stops GPS, Resume restarts it', async () => {
+  const a = await openApp(V2);
+  a.click('[data-action="today-mode"][data-mode="cardio"]');
+  a.click('[data-action="run-start-gps"]');
+  check(a.t.geo.starts === 1 && a.t.geo.watching, 'location asked for on Start');
+  for (let i = 0; i < 61; i++) a.fix();
+  const d = a.win.eval('db.activeRun.dist');
+  check(d > 170 && d < 186, `distance after 60 s at 3 m/s: ${d}`);
+  await wait(1100);                                  // let the once-a-second screen update run
+  check(a.doc.querySelector('[data-rs="dist"]').textContent === '0.18', `screen shows ${a.doc.querySelector('[data-rs="dist"]').textContent} km`);
+  check(a.has('#run-map polyline.route'), 'route is drawn');
+  check(!a.doc.querySelector('#view image') && !a.doc.querySelector('#view img'), 'no map tiles or images');
+  a.click('[data-action="run-pause"]');
+  check(!a.t.geo.watching, 'GPS is off while paused');
+  check(a.saved().activeRun.paused === true, 'pause is saved');
+  a.click('[data-action="run-resume"]');
+  check(a.t.geo.watching && a.t.geo.starts === 2, 'GPS back on after Resume');
+  a.fix(60, 20);                                     // moved while paused: must not be added
+  check(Math.abs(a.win.eval('db.activeRun.dist') - d) < 0.01, 'nothing added across the pause');
+  for (let i = 0; i < 10; i++) a.fix();
+  a.click('[data-action="run-lock"]');
+  check(a.has('.run-lock') && !a.has('[data-action="run-finish"]'), 'touch lock covers the buttons');
+  const hold = a.doc.querySelector('[data-hold="unlock"]');
+  hold.dispatchEvent(new a.win.PointerEvent('pointerdown', { bubbles: true }));
+  await wait(300);
+  hold.dispatchEvent(new a.win.PointerEvent('pointerup', { bubbles: true }));
+  await wait(900);
+  check(a.has('.run-lock'), 'a short press does not unlock');
+  a.doc.querySelector('[data-hold="unlock"]').dispatchEvent(new a.win.PointerEvent('pointerdown', { bubbles: true }));
+  await wait(1200);
+  check(!a.has('.run-lock'), 'holding for a second unlocks');
+  a.click('[data-action="run-finish"]');
+  const x = a.saved().runs[0];
+  check(x && !x.treadmill && x.route.length === 2 && x.dist > 195 && x.dist < 216, `saved ${JSON.stringify({ ...x, route: x && x.route.length })}`);
+  check(!a.t.geo.watching, 'GPS off after Finish');
+  a.click('.tabs button[data-tab="history"]');
+  a.click('[data-action="history-mode"][data-mode="cardio"]');
+  a.click('details[data-run] summary');
+  await wait(50);
+  check(a.all('details[data-run] svg.map polyline.route').length === 2, 'saved route drawn in History');
+  a.click('[data-action="route-delete"]');
+  check(a.saved().runs[0].route.length === 0 && a.saved().runs[0].dist === x.dist, 'route deleted, numbers kept');
+});
+
+scenario('Outdoor run: leaving the app pauses it until Resume is tapped', async () => {
+  const a = await openApp(V2);
+  a.click('[data-action="today-mode"][data-mode="cardio"]');
+  a.click('[data-action="run-start-gps"]');
+  for (let i = 0; i < 30; i++) a.fix();
+  a.visibility('hidden');
+  check(a.saved().activeRun.paused && a.saved().activeRun.recovered && !a.t.geo.watching, 'paused, saved, GPS off');
+  a.forward(120000);
+  a.visibility('visible');
+  check(!a.t.geo.watching && a.screen().includes('Tracking stopped when this app left the screen'), 'still paused, and the screen says why');
+  a.click('[data-action="run-resume"]');
+  check(a.t.geo.watching, 'tracking again after Resume');
+  a.click('[data-action="run-discard"]');
+  check(a.saved().activeRun === null && a.saved().runs.length === 0, 'discarded');
+});
+
+scenario('Recovery: damaged data with no room for a copy pauses saving; the notice buttons work', async () => {
+  const damaged = JSON.parse(JSON.stringify(V2));
+  damaged.sessions.push({ id: 'broken' });           // one unreadable record
+  const raw = JSON.stringify(damaged);
+  const a = await openApp(raw, { noRoomForCopies: true });
+  check(a.screen().includes('Saving is paused') || a.has('[data-action="recovery-download"]'), 'recovery notice is shown');
+  check(a.has('[data-action="recovery-download"]') && a.has('[data-action="recovery-keep"]'), 'download and keep buttons are there');
+  a.click('[data-action="start"]');                  // nothing may be written while saving is paused
+  check(a.rawSaved() === raw, 'saved data untouched by Start');
+  a.click('[data-action="today-mode"][data-mode="cardio"]');
+  a.click('[data-action="run-start-gps"]');
+  check(a.rawSaved() === raw && a.t.geo.starts === 0, 'a run cannot start, and location is not asked for');
+  a.click('[data-action="today-mode"][data-mode="lift"]');
+  a.t.answer = true;
+  a.click('[data-action="recovery-keep"]');          // the owner chooses to continue with what loaded
+  check(!a.has('[data-action="recovery-keep"]'), 'notice gone');
+  const s = a.saved();
+  check(s.version === 4 && s.sessions.length === 1 && JSON.stringify(s.sessions[0]) === JSON.stringify(V2.sessions[0]), 'the readable workout is kept');
+  check(s.bodyweights.length === 1, 'weigh-in kept');
+});
+
+/* ---------- run ---------- */
+(async () => {
+  const log = document.getElementById('log');
+  const before = { data: localStorage.getItem(KEY), keys: Object.keys(localStorage).sort().join('|'), session: Object.keys(sessionStorage).sort().join('|') };
+  const results = [];
+  try {
+    const html = await (await fetch(`${ROOT}index.html`)).text();
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    parsed.querySelectorAll('script').forEach((s) => s.remove());
+    SHELL = parsed.body.innerHTML;
+  } catch (e) {
+    document.getElementById('result').innerHTML = '<span class="fail">Could not load index.html. Open this page through a local web server, not as a file.</span>';
+    window.__smoke = { done: true, failed: 1, results: [{ name: 'load index.html', ok: false, error: String(e) }] };
+    return;
+  }
+  scenario('This browser\'s real saved data is exactly as it was', async () => {
+    check(localStorage.getItem(KEY) === before.data, 'the real gymlog.v1 changed');
+    check(Object.keys(localStorage).sort().join('|') === before.keys, 'real localStorage keys changed');
+    check(Object.keys(sessionStorage).sort().join('|') === before.session, 'real sessionStorage keys changed');
+  });
+  for (const [name, fn] of scenarios) {
+    const li = document.createElement('li');
+    try {
+      await fn();
+      li.innerHTML = '<span class="ok">ok</span> ';
+      li.append(name);
+      results.push({ name, ok: true });
+    } catch (e) {
+      li.innerHTML = '<span class="fail">FAIL</span> ';
+      li.append(name);
+      const pre = document.createElement('pre');
+      pre.textContent = String(e && e.message);
+      li.append(pre);
+      results.push({ name, ok: false, error: String(e && e.message) });
+    }
+    log.appendChild(li);
+  }
+  const failed = results.filter((r) => !r.ok).length;
+  document.getElementById('result').innerHTML = failed
+    ? `<span class="fail">${failed} of ${results.length} failed</span>`
+    : `<span class="ok">All ${results.length} passed</span>`;
+  document.title = failed ? `FAIL ${failed}/${results.length}` : `PASS ${results.length}/${results.length}`;
+  window.__smoke = { done: true, failed, results };
+})();
+</script>
+</body>
+</html>

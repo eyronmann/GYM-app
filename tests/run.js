@@ -377,6 +377,72 @@ test('steps: counted from the motion sensor without a new GPS fix, and marked un
   assert.strictEqual(a.saved().bodyweights.length, 2, "the other window's save is intact");
 });
 
+test('motion permission answered in time: steps are counted, with one listener', async () => {
+  const a = boot({ stored: V2 });
+  a.askForMotion();
+  startGpsRun(a);
+  assert.strictEqual(a.motion.asks, 1);
+  assert.strictEqual(a.listening('devicemotion'), 0, 'nothing listens before the answer');
+  a.motion.pending[0]('granted');
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 1);
+  for (let i = 0; i < 10; i++) a.footfall();
+  assert.strictEqual(a.db.activeRun.steps, 10);
+});
+
+test('motion permission answered after Pause: nothing listens until Resume asks again', async () => {
+  const a = boot({ stored: V2 });
+  a.askForMotion();
+  startGpsRun(a);
+  runNorth(a, 20);
+  a.tap('run-pause');
+  a.motion.pending[0]('granted');                                  // the answer arrives while paused
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 0, 'no listener while paused');
+  assert.strictEqual(a.run('stepState'), null);
+  for (let i = 0; i < 10; i++) a.footfall();
+  assert.strictEqual(a.db.activeRun.steps, 0);
+
+  a.tap('run-resume');                                             // a new request
+  assert.strictEqual(a.motion.asks, 2);
+  a.fix();
+  a.motion.pending[1]('granted');
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 1, 'exactly one listener after Resume');
+  for (let i = 0; i < 10; i++) a.footfall();
+  assert.strictEqual(a.db.activeRun.steps, 10);
+});
+
+test('motion permission answered after Finish or Discard: nothing listens, even once a new run starts', async () => {
+  const a = boot({ stored: V2 });
+  a.askForMotion();
+  startGpsRun(a);
+  runNorth(a, 60);
+  a.tap('run-finish');
+  assert.strictEqual(a.db.activeRun, null);
+  a.motion.pending[0]('granted');                                  // the answer arrives after Finish
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 0, 'no listener after Finish');
+  assert.strictEqual(a.run('stepState'), null);
+
+  startGpsRun(a);                                                  // request 2
+  a.page.answer = true;
+  a.tap('run-discard');
+  a.motion.pending[1]('granted');                                  // answered after Discard
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 0, 'no listener after Discard');
+
+  startGpsRun(a);                                                  // request 3, still unanswered
+  a.motion.pending[1]('granted');                                  // a stale answer repeated: still ignored
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 0, 'an old answer does not start a new run\'s counting');
+  a.motion.pending[2]('denied');
+  await tick();
+  assert.strictEqual(a.listening('devicemotion'), 0, 'refused: the run works without steps');
+  runNorth(a, 30);
+  near(a.db.activeRun.dist, 90, 3);
+});
+
 test('steps: saved only when the rhythm is believable; never made up from pace', () => {
   const a = boot({ stored: V2 });
   startGpsRun(a);
@@ -514,6 +580,79 @@ test('another window saves during a routine and the routine cannot be put aside:
   a.tap('sheet-close');                                            // the owner closes it (and confirms)
   assert.strictEqual(a.page.reloads, 1, 'then it reloads');
   assert.strictEqual(a.saved().bodyweights.length, 2, "the other window's save was never overwritten");
+});
+
+test('another window saves, the routine cannot be put aside, then no safety copy fits: no reload, nothing discarded', () => {
+  const a = boot({ stored: V2 });
+  a.tap('routine-open', { id: 'posture' });                        // 1. start a routine
+  a.tap('routine-start');
+  a.tap('step-tick', { id: 'chin-tuck' });
+  a.tap('step-tick', { id: 'wall-angel' });
+  a.el('rt-notes').value = 'neck stiff';
+  a.advance(300000);
+  a.session.failWrites = true;                                     // 2. sessionStorage refuses writes
+  const b = boot({ local: a.local });                              // 3. another window saves new data
+  b.run("commit(() => { db.bodyweights.push({ id: 'bw2', date: '2026-11-15', w: 50.2 }); })");
+  const others = a.local.getItem('gymlog.v1');
+  a.otherWindowSaved();
+  assert.strictEqual(a.run('reloadWaiting'), true);                // 4. the reload waits
+  assert.strictEqual(a.page.reloads, 0);
+  a.local.failWrites = true;                                       // 5. no room for a safety copy either
+  a.tap('routine-finish');                                         // 6-9. Finish: stale data, copy fails, saving pauses
+
+  assert.strictEqual(a.page.reloads, 0, 'no reload occurs');
+  assert.strictEqual(a.run('reloadWaiting'), false, 'the waiting reload is cancelled');
+  const rec = a.run('recovery');
+  assert.strictEqual(rec.reason, 'conflict');
+  const kept = JSON.parse(rec.raw);
+  same(kept.moveLog.map(({ name, done, notes, secs }) => ({ name, done, notes, secs })),
+    [{ name: 'Posture routine', done: ['Chin Tuck', 'Wall Angel'], notes: 'neck stiff', secs: 300 }], 'the finished routine is in the recovery copy');
+  same(kept.sessions, V2.sessions, 'with the rest of this window\'s data');
+  assert.ok(a.sheet && a.sheet.kind === 'routine' && a.sheet.done['wall-angel'] === true, 'the routine is still open with its ticks');
+  assert.strictEqual(a.el('rt-notes').value, 'neck stiff', 'and its notes');
+  assert.ok(a.el('view').innerHTML.includes('recovery-download'), 'the download is offered');
+  assert.strictEqual(a.local.getItem('gymlog.v1'), others, "the other window's saved data is untouched");
+
+  // More of the same must not change that: another Finish, another save elsewhere, closing the sheet.
+  a.tap('routine-finish');
+  a.otherWindowSaved();
+  a.page.answer = true;
+  a.tap('sheet-close');
+  assert.strictEqual(a.page.reloads, 0, 'still no reload, even with the sheet closed');
+  assert.strictEqual(JSON.parse(a.run('recovery').raw).moveLog.length, 1, 'the recovery copy is still there');
+  assert.strictEqual(a.local.getItem('gymlog.v1'), others);
+});
+
+test('another window clears the data and no safety copy fits: an open routine stays open, no reload', () => {
+  const a = boot({ stored: V2 });
+  a.tap('routine-open', { id: 'mobility' });
+  a.tap('routine-start');
+  a.tap('step-tick', { id: 'cat-cow' });
+  a.local.failWrites = true;
+  a.fire('window', 'storage', { key: 'gymlog.v1', newValue: null });
+  assert.strictEqual(a.page.reloads, 0);
+  assert.strictEqual(a.run('recovery').reason, 'conflict');
+  same(JSON.parse(a.run('recovery').raw).sessions, V2.sessions);
+  assert.ok(a.sheet && a.sheet.kind === 'routine' && a.sheet.done['cat-cow'] === true);
+});
+
+test('saving is paused: closing a started routine puts it aside, and it reopens after the reload', () => {
+  const raw = JSON.stringify({ ...V4, version: 9 });               // data from a newer app: saving pauses
+  const a = boot({ stored: raw });
+  a.tap('routine-open', { id: 'posture' });
+  a.tap('routine-start');
+  const startedAt = a.sheet.startedAt;
+  a.tap('step-tick', { id: 'dead-bug' });
+  a.el('rt-notes').value = 'later';
+  a.tap('sheet-close');
+  assert.strictEqual(a.page.confirms.length, 0, 'not asked to throw it away');
+  assert.strictEqual(a.sheet, null);
+  assert.ok(a.session.getItem('gymlog.routine'), 'it was put aside');
+  const b = boot({ stored: V4, session: a.session, now: a.clock.now + 60000 }); // reloaded, now readable
+  assert.ok(b.sheet && b.sheet.id === 'posture' && b.sheet.startedAt === startedAt && b.sheet.done['dead-bug'] === true);
+  assert.strictEqual(b.el('rt-notes').value, 'later');
+  b.tap('routine-finish');
+  assert.strictEqual(b.db.moveLog.length, V4.moveLog.length + 1);
 });
 
 test('another window saves during a GPS run: unsaved points go to a safety copy, the run returns paused', () => {

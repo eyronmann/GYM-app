@@ -143,6 +143,7 @@ function boot({ stored = null, local = new FakeStorage(), session = new FakeStor
   };
 
   const page = { reloads: 0, confirms: [], prompts: [], answer: true, promptAnswer: null };
+  const motion = { asks: 0, pending: [] };
   const sandbox = {
     console,
     Date: FakeDate,
@@ -183,6 +184,14 @@ function boot({ stored = null, local = new FakeStorage(), session = new FakeStor
     session,
     el: byId,
     fire,
+    motion,
+    // How many functions are listening for an event on the window, e.g. 'devicemotion'.
+    listening: (type) => (listeners.window[type] || []).length,
+    // Make this browser ask before giving motion data, as iPhones do. Each request waits
+    // in motion.pending until the test answers it: motion.pending[0]('granted').
+    askForMotion() {
+      sandbox.DeviceMotionEvent.requestPermission = () => { motion.asks += 1; return new Promise((resolve) => motion.pending.push(resolve)); };
+    },
     get db() { return run('db'); },
     get sheet() { return run('sheet'); },
     // What is in storage right now, parsed.

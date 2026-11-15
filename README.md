@@ -77,8 +77,10 @@ To restore, use **More → Backup and settings → Restore from a backup file** 
 
 The rules are in [AGENTS.md](AGENTS.md). Any AI working on this repo reads it first.
 
-0. `node tests/run.js` checks the data rules (needs Node, nothing else). It uses
-   fake storage and can't touch my real data.
+0. `node tests/run.js` checks the data rules (needs Node, nothing else). With the
+   local server below running, `http://localhost:8000/tests/smoke.html` presses
+   the app's real buttons in my browser. Both use fake storage and can't touch
+   my real data.
 1. Ask one AI (Claude or ChatGPT) for a change.
 2. Have the other one review it against AGENTS.md.
 3. Try it on my phone before merging.

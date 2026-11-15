@@ -46,7 +46,7 @@ hosted as static files on GitHub Pages.
 | `data/exercises.js` | Built-in exercise library (`window.EXERCISES`): name, muscle group, equipment, form cues, alternatives |
 | `data/foods.js` | Built-in food list (`window.FOODS`): per-serving calories, protein, carbs, fat |
 | `sw.js` | Offline cache (cache first, refresh in background) |
-| `tests/` | `node tests/run.js` runs the real app files against a fake page and fake storage. Not loaded by the app, so not in `sw.js` |
+| `tests/` | `node tests/run.js` (data rules, fake page and storage) and `tests/smoke.html` (real buttons in a real browser, fake storage). Not loaded by the app, so not in `sw.js` |
 | `manifest.webmanifest`, `icons/` | Home-screen install |
 
 Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
@@ -196,8 +196,19 @@ The mobility log and cardio follow the same rules. In particular:
 - Every reload the app does on its own goes through `reloadSafely()`. It first
   puts a started routine into `sessionStorage` (`stashRoutine()`), and
   `restoreRoutine()` reopens it after the reload with its ticks, clock and
-  notes. If the routine can't be put aside, the reload waits until its sheet is
-  closed. Never call `location.reload()` directly.
+  notes. If the routine can't be put aside, the reload waits (`reloadWaiting`)
+  until the owner closes that sheet himself: `userCloseSheet()` is the only
+  place that carries out a waiting reload. `closeSheet()` never reloads.
+  Never call `location.reload()` directly.
+- The app never reloads on its own while recovery data exists only in memory
+  (`recoveryOnlyInMemory()`: unreadable or partly unreadable data with no copy,
+  or this window's side of a conflict with no room for a copy). Entering that
+  state cancels any waiting reload (`showRecoveryNotice()`). Only the owner's
+  own "Reload app" tap reloads then, after the download has been offered.
+- `showRecoveryNotice()` closes an open sheet so the notice can be seen, except
+  a started routine, which stays open with its ticks and notes. While saving is
+  paused, closing a started routine puts it aside in `sessionStorage` instead of
+  discarding it, and it reopens after the next reload.
 - Leaving the app (`visibilitychange` to hidden) pauses a GPS run and saves it
   at once. Browsers also report "hidden" during a reload; when the app asked for
   that reload itself (`reloading`), nothing is saved a second time.
@@ -248,7 +259,10 @@ copy the owner exports. The backup screen says the file shows where he runs.
 - Location and motion permission are requested only when a GPS run is started
   or resumed, never at startup. Where the browser has
   `DeviceMotionEvent.requestPermission` (iPhone Safari does) it is called from
-  that tap; if it is refused the run works without steps.
+  that tap; if it is refused the run works without steps. The answer can arrive
+  late, so `startSteps()` only starts listening if its request is still the
+  latest (`stepRequest`, which `stopSteps()` also advances) and the run is still
+  being tracked. Keep that check when touching step counting.
 - There is no step-counter API. During a GPS run, steps are counted from the
   motion sensor (`devicemotion`) and saved only when the count works out to
   60 to 210 steps a minute over the moving time; otherwise `steps` is `null`
@@ -283,8 +297,25 @@ saved data.
   calorie equations, permissions and labels.
 - A change to saved data, `migrate()`, saving, or the GPS and time maths comes
   with a test that fails without it. Run the tests before every commit.
+- They call the app's button handlers directly, so they do not prove a tap on
+  the screen reaches them. `tests/smoke.html` covers that.
 - They cannot check layout (390 px, tap targets, input size), real GPS, real
   sensors, the real wake lock or battery use. Those need a browser or a phone.
+
+`tests/smoke.html` is the browser smoke test. Run `python -m http.server 8000`
+in the repo folder and open `http://localhost:8000/tests/smoke.html`; it runs
+by itself and lists what passed. It loads the real app into a 390 px frame and
+presses its real buttons (tabs, lifting, a routine, a single move, the
+treadmill timer and form, an outdoor run with pause, resume, touch lock and
+leaving the app, and the recovery notice).
+
+- It cannot touch real data: before any app file loads, the frame's
+  `localStorage` and `sessionStorage` are replaced by empty ones in memory, the
+  test stops if that replacement is not in place, and its last check is that
+  the browser's real saved data is exactly as it was. Keep all three.
+- GPS, the clock, the wake lock and confirm boxes are stand-ins there too. It
+  does not cover app-initiated reloads (those are in `node tests/run.js`), the
+  layout rules, or a physical phone.
 
 ## Built-in data accuracy
 

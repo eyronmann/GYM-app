@@ -17,7 +17,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 4;
-const APP_VERSION = '3.3.1';
+const APP_VERSION = '3.4.0';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -432,6 +432,7 @@ function clampSets(v) {
 
 let startupNotice = '';
 const NOTE_KEY = 'gymlog.note'; // sessionStorage: a message to show after a reload
+const DRAFT_KEY = 'gymlog.routine'; // sessionStorage: a routine in progress, carried across a reload
 
 // Recovery mode: set when saved data exists but can't be used safely AND we couldn't
 // keep a copy of it. While it is set, save() refuses to write, so nothing is overwritten.
@@ -558,6 +559,46 @@ function save() {
   }
 }
 
+// A started routine (its ticks, clock and notes) lives only in its open sheet, so a reload
+// would lose it. Before the app reloads itself, the routine is put in sessionStorage, which
+// belongs to this window and survives a reload; restoreRoutine() reopens it afterwards.
+// Returns false only when there is a routine in progress and it could not be kept.
+function stashRoutine() {
+  if (!sheet || sheet.kind !== 'routine' || sheet.startedAt == null) return true;
+  const box = $('#rt-notes');
+  try {
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ id: sheet.id, startedAt: sheet.startedAt, done: sheet.done, notes: box ? box.value : '' }));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function restoreRoutine() {
+  let d = null;
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    if (!raw) return;
+    sessionStorage.removeItem(DRAFT_KEY);
+    d = JSON.parse(raw);
+  } catch (_) { return; }
+  if (!d || typeof d !== 'object' || !ROUTINE_BY_ID.has(d.id) || !Number.isFinite(d.startedAt) || !d.done || typeof d.done !== 'object') return;
+  openSheet({ kind: 'routine', id: d.id, startedAt: d.startedAt, done: d.done });
+  const box = $('#rt-notes');
+  if (box && typeof d.notes === 'string') box.value = d.notes;
+}
+
+// Every reload the app does on its own goes through here, so a routine in progress is
+// never dropped. If it can't be carried across, the reload waits until the routine's
+// sheet is closed (closeSheet() does it then).
+let reloadWaiting = false;
+let reloading = false; // true once the app has asked the browser to reload this window
+function reloadSafely() {
+  if (stashRoutine()) { reloading = true; location.reload(); return; }
+  reloadWaiting = true;
+  toast('Your data changed in another window. Finish or close this routine and the app will reload.');
+}
+
 // Another window saved first. Keep this window's version (including the change it was
 // about to save) as a safety copy, then reload so the startup checks run on what's stored.
 // If there's no room for the copy, don't reload: pause saving and offer it as a download.
@@ -567,7 +608,7 @@ function handleOtherWindowSave(mine) {
     try {
       sessionStorage.setItem(NOTE_KEY, "Another window saved your data first, so this window didn't save over it. What this window had was kept as a safety copy in More > Backup and settings.");
     } catch (_) { /* no note, still safe */ }
-    location.reload();
+    reloadSafely();
     return;
   }
   recovery = { reason: 'conflict', raw: mine };
@@ -2016,6 +2057,7 @@ function closeSheet() {
   const d = $('#sheet');
   if (d.open) d.close();
   sheet = null;
+  if (reloadWaiting) { reloadWaiting = false; reloading = true; location.reload(); } // a reload that waited for a routine
 }
 
 // Closing by the user (✕, backdrop, back gesture). A routine that has been started asks first.
@@ -2352,7 +2394,7 @@ const actions = {
   'recovery-download': () => {
     if (recovery && recovery.raw) downloadText(`gym-log-saved-data-${localDate()}.json`, recovery.raw);
   },
-  'recovery-reload': () => location.reload(),
+  'recovery-reload': () => reloadSafely(),
   'recovery-fresh': () => {
     if (!confirm('Start fresh? This replaces the unreadable data on this phone for good. Download it first if you might need it.')) return;
     // save() refuses while recovery is set, so lift it for this one write and put it back on failure.
@@ -2538,7 +2580,7 @@ window.addEventListener('storage', (e) => {
     note = 'Reloaded because your data was changed in another window. What this window had was kept as a safety copy in More > Backup and settings.';
   }
   try { sessionStorage.setItem(NOTE_KEY, note); } catch (_) { /* no note, still safe */ }
-  location.reload();
+  reloadSafely();
 });
 
 // Workout clock: update just the number once a second.
@@ -2560,4 +2602,5 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 recoverRun();
 if (db.activeRun) todayMode = 'cardio';
 render();
+restoreRoutine(); // a routine that was in progress when the app reloaded itself
 if (db.active) keepAwake();

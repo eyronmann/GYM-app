@@ -46,6 +46,7 @@ hosted as static files on GitHub Pages.
 | `data/exercises.js` | Built-in exercise library (`window.EXERCISES`): name, muscle group, equipment, form cues, alternatives |
 | `data/foods.js` | Built-in food list (`window.FOODS`): per-serving calories, protein, carbs, fat |
 | `sw.js` | Offline cache (cache first, refresh in background) |
+| `tests/` | `node tests/run.js` runs the real app files against a fake page and fake storage. Not loaded by the app, so not in `sw.js` |
 | `manifest.webmanifest`, `icons/` | Home-screen install |
 
 Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
@@ -123,15 +124,18 @@ version didn't have yet start empty and are not counted as damage.
   the run stays on screen and the toast says so). On Finish the route is thinned
   to about 200 points, because `localStorage` holds roughly 5 MB in total.
   Never store full-resolution tracks in `runs`.
-- A GPS run found unpaused at startup (the app was closed mid-run) is paused at
-  its last recorded point and marked `recovered`. GPS is not switched back on
-  until Resume is tapped.
+- `recovered: true` means the app paused the run itself, not the owner: either
+  the app left the screen (see the cardio limits below), or a run was found
+  unpaused at startup and was paused at its last recorded point. Either way GPS
+  stays off until Resume is tapped.
 - A timed cardio session (`gps: false`) runs on the wall clock, so it keeps
   counting through a locked phone or a reload. Finish pauses it and opens the
   by-hand form; the session is cleared only when that form saves.
-- A routine in progress (its ticks, clock and notes) lives only in the open
-  sheet, not in saved data. Closing it asks first. If the save on Finish fails,
-  the sheet stays open with everything in it.
+- A routine in progress (its ticks, clock and notes) lives in the open sheet,
+  not in saved data. Closing it asks first. If the save on Finish fails, the
+  sheet stays open with everything in it. When the app reloads itself, the
+  routine is carried across in `sessionStorage["gymlog.routine"]` and reopened
+  (see `reloadSafely()` below).
 
 ## Protecting saved data (how the code does rule 4)
 
@@ -184,11 +188,19 @@ The mobility log and cardio follow the same rules. In particular:
 - A failed save never drops work in progress: a routine's sheet stays open with
   its ticks and notes, the cardio form stays open with its timer still paused,
   and a GPS run stays in progress. None of them shows a success message.
-- GPS points recorded since the last 10-second save exist only in memory. While
-  that is so, `unsaved` is true, which makes the other-window check keep this
-  window's copy (reason `other-window`) before it reloads. The run then comes
-  back paused from what was saved; the copy is not merged in automatically.
-- Leaving the app (`visibilitychange` to hidden) saves a GPS run at once.
+- GPS points and motion-sensor steps recorded since the last 10-second save
+  exist only in memory. While that is so, `unsaved` is true, which makes the
+  other-window check keep this window's copy (reason `other-window`) before it
+  reloads. The run then comes back paused from what was saved; the copy is not
+  merged in automatically, and that is the intended design.
+- Every reload the app does on its own goes through `reloadSafely()`. It first
+  puts a started routine into `sessionStorage` (`stashRoutine()`), and
+  `restoreRoutine()` reopens it after the reload with its ticks, clock and
+  notes. If the routine can't be put aside, the reload waits until its sheet is
+  closed. Never call `location.reload()` directly.
+- Leaving the app (`visibilitychange` to hidden) pauses a GPS run and saves it
+  at once. Browsers also report "hidden" during a reload; when the app asked for
+  that reload itself (`reloading`), nothing is saved a second time.
 - Restoring a backup that holds an unpaused GPS run brings it back paused.
 - In recovery mode nothing can be started or saved, including runs, timers and
   routines, because `commit()` fails. That is intended.
@@ -213,12 +225,22 @@ copy the owner exports. The backup screen says the file shows where he runs.
   iOS 18.4. So the run screen shows a warning whenever the API is missing *or* a
   request was refused (`wakeRefused`), telling the owner to lengthen the phone's
   screen timeout. Keep that check on the request's result, not on the API existing.
-- A run is not paused automatically when the app goes to the background. The
-  clock keeps running, the missing time is recorded in `gapSecs` and shown, and
-  the distance across the gap is the straight line between the fixes on either
-  side (the least that was covered). If the position didn't change, the gap
-  counts as standing still. If the browser closes the app instead, the run comes
-  back paused at its last recorded point.
+- When the app leaves the screen (the phone locks, or another app comes to the
+  front) a GPS run is paused and saved at once, and it stays paused until the
+  owner taps Resume. The run screen says why. No distance or time is counted for
+  the time away. An explicit Resume is required on purpose: that tap is what
+  lets the browser hand back the wake lock and the motion sensor. If the pause
+  can't be saved (storage full), the run carries on in memory instead.
+- While a run is paused, by the owner or by the app, GPS and the motion sensor
+  are off and the wake lock is released. Resume turns them back on; the clock
+  then waits for the next good fix, and that fix starts a new stretch of route,
+  so nothing between Pause and Resume is ever added to the distance.
+- `gapSecs` is time with no usable fix while the run was being tracked (no
+  signal, or fixes worse than 35 m). A gap is added when the next good fix
+  arrives, with only the straight line between the two fixes as distance. A gap
+  still going on at Pause or Finish is added then (`stopClock()`), with no
+  distance. `lastFixAt` is cleared only after that pause or finish has been
+  saved, so a gap is counted once even if the first save fails.
 - No street map and no directions. The route is drawn as an SVG from the
   recorded points on a plain background, with a scale bar and north up. A real
   map needs online tiles (which would be sent the user's position) or a map
@@ -240,11 +262,29 @@ copy the owner exports. The backup screen says the file shows where he runs.
   that is larger, is treated as jitter; anything faster than 8 m/s is a jump and
   is dropped; no progress for 15 s followed by less than 0.5 m/s counts as
   standing still and is left out of moving time.
-- Tested only in desktop Chrome at 390 px with simulated GPS and simulated
-  motion events. Nothing here has run on a physical phone. Time to first fix,
+- Tested only with `node tests/run.js` and in desktop Chrome at 390 px with
+  simulated GPS and simulated motion events. Nothing here has run on a physical phone. Time to first fix,
   drift between buildings, battery use, the wake lock on iPhone, and whether the
   step thresholds suit a phone in a pocket or armband are all unverified until
   the owner tries them. The step thresholds in `onMotion` are a first guess.
+
+## Tests
+
+`node tests/run.js` runs `tests/run.js` with plain Node: no packages, no build
+step. `tests/harness.js` loads the real `data/*.js`, `cardio.js` and `app.js`
+into a fake page with fake storage, a fake clock, fake GPS and a fake motion
+sensor. Storage there is an object in memory, so the tests cannot touch real
+saved data.
+
+- They cover: version 1 to 4 migration, a session in progress reloading with 0
+  problems, failed saves, another window saving during a routine or a run,
+  steps with no new GPS fix, an outage followed by Finish, pause and resume,
+  leaving the app, backup and restore with routes, deleting, recovery mode, the
+  calorie equations, permissions and labels.
+- A change to saved data, `migrate()`, saving, or the GPS and time maths comes
+  with a test that fails without it. Run the tests before every commit.
+- They cannot check layout (390 px, tap targets, input size), real GPS, real
+  sensors, the real wake lock or battery use. Those need a browser or a phone.
 
 ## Built-in data accuracy
 

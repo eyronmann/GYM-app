@@ -16,8 +16,9 @@ no signal, and keeps everything on the phone.
 **Cardio** (Today → Cardio)
 - **Outdoors, GPS:** tracks distance, moving and elapsed time, current and
   average pace and speed, and draws my route. Pause, resume, finish.
-- **The screen must stay on with the app open.** A locked phone stops the
-  tracking. Tap **Lock screen** before pocketing the phone. If the phone won't
+- **The screen must stay on with the app open.** If the phone locks or I switch
+  apps, the run pauses and waits for me to tap **Resume**; nothing is counted
+  for the time away. Tap **Lock screen** before pocketing the phone. If the phone won't
   let the app keep the screen on (iPhones before iOS 18.4, in the Home Screen
   app), the run screen warns me to lengthen the screen timeout first.
 - There is no street map and there are no directions: the route is drawn on a
@@ -76,6 +77,8 @@ To restore, use **More → Backup and settings → Restore from a backup file** 
 
 The rules are in [AGENTS.md](AGENTS.md). Any AI working on this repo reads it first.
 
+0. `node tests/run.js` checks the data rules (needs Node, nothing else). It uses
+   fake storage and can't touch my real data.
 1. Ask one AI (Claude or ChatGPT) for a change.
 2. Have the other one review it against AGENTS.md.
 3. Try it on my phone before merging.

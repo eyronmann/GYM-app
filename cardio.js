@@ -323,7 +323,9 @@ function onFix(pos) {
   if (r && r.gps && !r.paused && good) {
     const wasWaiting = r.lastResumeAt == null;
     addPoint(r, here, Date.now(), c.accuracy);
-    if (Date.now() - lastRunSaveAt > 10000) { lastRunSaveAt = Date.now(); save(); }
+    // Between saves these points exist only in this window. Saying so makes the
+    // other-window check keep a safety copy of them before it reloads.
+    if (Date.now() - lastRunSaveAt > 10000) { lastRunSaveAt = Date.now(); save(); } else unsaved = true;
     if (wasWaiting) { render(); return; }
   }
   if (firstFix && r) { render(); return; }
@@ -693,7 +695,7 @@ function viewGpsRun(r) {
       </div>
     </div>
     ${waiting && gps.state !== 'error' ? '<div class="notice">The clock starts by itself at the first good GPS fix. This can take up to a minute outdoors, and longer indoors.</div>' : ''}
-    ${'wakeLock' in navigator ? '' : "<div class=\"notice warn\">This browser can't keep the screen on. Set your phone's screen timeout to its longest setting before you run, or tracking stops when the screen turns off.</div>"}
+    ${'wakeLock' in navigator && !wakeRefused ? '' : "<div class=\"notice warn\">This browser isn't keeping the screen on. Set your phone's screen timeout to its longest setting before you run, or tracking stops when the screen turns off. (iPhones before iOS 18.4 can't do this in an app added to the Home Screen.)</div>"}
     <section class="card">
       <p class="huge num" style="margin:0 0 10px"><span data-rs="dist">${n.dist}</span> <span class="unit">km</span></p>
       <div class="stats two">

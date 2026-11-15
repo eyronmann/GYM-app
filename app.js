@@ -17,7 +17,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 4;
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.3.1';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -517,7 +517,8 @@ function load() {
 }
 
 // Returns true only if the data really reached storage.
-// True while this window shows changes that storage refused (only typing can leave these).
+// True while this window holds changes that aren't in storage: typed text that storage
+// refused, or GPS points recorded since the last 10-second save of a run.
 let unsaved = false;
 
 function save() {
@@ -911,6 +912,9 @@ function stopRest() {
 /* ------------------------------------------------------------------ */
 
 let wakeLock = null;
+// True when the browser has a wake lock but refused it. iPhones did this in web apps
+// installed to the Home Screen from iOS 16.4 until 18.4, so "the API exists" proves nothing.
+let wakeRefused = false;
 async function keepAwake() {
   // A GPS run always needs the screen on: tracking stops when the phone locks.
   const wanted = (db.activeRun && db.activeRun.gps && gpsWatch != null) || (db.active && db.settings.keepAwake);
@@ -918,7 +922,11 @@ async function keepAwake() {
   try {
     wakeLock = await navigator.wakeLock.request('screen');
     wakeLock.addEventListener('release', () => { wakeLock = null; });
-  } catch (_) { /* not allowed right now */ }
+    if (wakeRefused) { wakeRefused = false; if (db.activeRun && tab === 'today') render(); }
+  } catch (_) {
+    // Not allowed. During a GPS run that matters, so the run screen says so.
+    if (!wakeRefused) { wakeRefused = true; if (db.activeRun && db.activeRun.gps && tab === 'today') render(); }
+  }
 }
 function releaseWake() {
   try { if (wakeLock) wakeLock.release(); } catch (_) { /* ignore */ }

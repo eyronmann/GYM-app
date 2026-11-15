@@ -18,6 +18,11 @@
     or another app in front stops the tracking. So a GPS run keeps the screen
     awake, and "Lock screen" covers it so a pocket can't press buttons.
     Background tracking needs a native app.
+  - When the app leaves the screen, the run is paused at once and saved, and it
+    stays paused until Resume is tapped. Nothing is counted for the time away.
+  - While a run is paused, GPS and the motion sensor are switched off and the
+    screen is allowed to sleep. Resume switches them back on, and the clock
+    waits for the next good fix, so finding the signal again costs no pace.
   - Nothing here uses the network. The route is drawn on this phone from the
     recorded points, on a plain background. There is no street map and there
     are no directions: both need an online map service or a map database far
@@ -177,15 +182,32 @@ function startRun(useGps) {
 // Stop the clock on a run object (no saving here; callers do it inside commit()).
 function stopClock(r) {
   if (r.paused) return;
-  r.stoppedMs += idleMs(r); // standing still right up to the pause
-  if (r.lastResumeAt) r.activeMs += Date.now() - r.lastResumeAt;
+  const now = Date.now();
+  r.stoppedMs += idleMs(r); // no progress right up to this moment
+  // A signal gap is normally counted when the next good fix arrives. One that is still
+  // going on now would never be counted, so count it here. No distance is added for it.
+  // (lastFixAt is cleared by stopGps() once the pause or finish has been saved, so the
+  // same gap can't be counted again.)
+  if (r.gps && lastFixAt != null && now - lastFixAt > GPS_GAP_MS) r.gapMs += now - lastFixAt;
+  if (r.lastResumeAt) r.activeMs += now - r.lastResumeAt;
   r.lastResumeAt = null;
   r.paused = true;
 }
 
-function pauseRun() {
+// byApp is true when the app pauses the run itself because it left the screen.
+function pauseRun(byApp) {
   if (!db.activeRun || db.activeRun.paused) return false;
-  return commit(() => stopClock(db.activeRun));
+  const ok = commit(() => {
+    stopClock(db.activeRun);
+    if (byApp) db.activeRun.recovered = true;
+  });
+  // Paused and saved: stop listening and let the screen sleep. Resume starts them again.
+  if (ok && db.activeRun.gps) {
+    stopGps();
+    stopSteps();
+    releaseWake();
+  }
+  return ok;
 }
 
 function resumeRun() {
@@ -194,8 +216,9 @@ function resumeRun() {
     const r = db.activeRun;
     r.paused = false;
     r.recovered = false;
-    // A GPS run with no points yet still waits for its first fix.
-    r.lastResumeAt = !r.gps || r.pts.length ? Date.now() : null;
+    // A GPS run's clock waits for the next good fix, as it did at the start. That fix
+    // begins a new stretch, so nothing between the pause and now is joined to the route.
+    r.lastResumeAt = r.gps ? null : Date.now();
     r.breakNext = r.pts.length > 0;
   });
   if (ok && db.activeRun.gps) {
@@ -407,6 +430,7 @@ function onMotion(e) {
     stepState.up = true;
     stepState.lastAt = now;
     r.steps += 1;
+    unsaved = true; // in memory only until the next 10-second save, like new GPS points
   } else if (stepState.up && bump < 0.5) stepState.up = false;
 }
 
@@ -627,7 +651,7 @@ const runPlace = (x) => (x.treadmill ? 'treadmill' : x.route.length ? 'GPS' : 'o
 
 function gpsLine(r) {
   if (gps.state === 'error') return gps.msg;
-  if (r.paused) return r.recovered ? 'Paused, because the app was closed mid-run. Tap Resume to carry on.' : 'Paused.';
+  if (r.paused) return r.recovered ? 'Paused, because the app left the screen. Tap Resume to carry on.' : 'Paused. GPS is off until you resume.';
   if (gps.state === 'ok') return `GPS locked, accurate to about ${gps.acc} m.`;
   if (gps.state === 'weak') return `Weak GPS (about ${gps.acc} m off). Move into the open. Nothing is recorded until it improves.`;
   return 'Looking for GPS. Stand in the open for a moment.';
@@ -694,8 +718,9 @@ function viewGpsRun(r) {
         <p class="muted small" data-rs="gps" style="margin:0">${esc(n.gps)}</p>
       </div>
     </div>
-    ${waiting && gps.state !== 'error' ? '<div class="notice">The clock starts by itself at the first good GPS fix. This can take up to a minute outdoors, and longer indoors.</div>' : ''}
-    ${'wakeLock' in navigator && !wakeRefused ? '' : "<div class=\"notice warn\">This browser isn't keeping the screen on. Set your phone's screen timeout to its longest setting before you run, or tracking stops when the screen turns off. (iPhones before iOS 18.4 can't do this in an app added to the Home Screen.)</div>"}
+    ${r.paused && r.recovered ? '<div class="notice warn">Tracking stopped when this app left the screen (the phone locked, you switched apps, or the app was closed). Nothing has been recorded since then. Tap Resume to carry on.</div>' : ''}
+    ${waiting && gps.state !== 'error' ? `<div class="notice">${r.pts.length ? 'The clock starts again by itself at the next good GPS fix.' : 'The clock starts by itself at the first good GPS fix. This can take up to a minute outdoors, and longer indoors.'}</div>` : ''}
+    ${r.paused || ('wakeLock' in navigator && !wakeRefused) ? '' : "<div class=\"notice warn\">This browser isn't keeping the screen on. Set your phone's screen timeout to its longest setting before you run, or tracking stops when the screen turns off. (iPhones before iOS 18.4 can't do this in an app added to the Home Screen.)</div>"}
     <section class="card">
       <p class="huge num" style="margin:0 0 10px"><span data-rs="dist">${n.dist}</span> <span class="unit">km</span></p>
       <div class="stats two">
@@ -722,7 +747,7 @@ function viewGpsRun(r) {
       <button type="button" class="btn primary block" data-action="run-finish">Finish and save</button>
       <button type="button" class="btn danger block" data-action="run-discard">Discard</button>
     </div>
-    <p class="muted small" style="margin-top:14px">Keep this screen on and the app open. Locking the phone or switching apps stops the tracking. Use Lock screen before putting the phone in a pocket or armband. Steps are counted from the phone's movement, so they only show when the phone is on your body, and they are an estimate. Your location stays on this phone.</p>`;
+    <p class="muted small" style="margin-top:14px">Keep this screen on and the app open. If the phone locks or you switch apps, the run pauses and waits for you to tap Resume. Use Lock screen before putting the phone in a pocket or armband. Steps are counted from the phone's movement, so they only show when the phone is on your body, and they are an estimate. Your location stays on this phone.</p>`;
 }
 
 function viewRun() {
@@ -755,7 +780,7 @@ function runStatsHtml(x) {
   if (x.steps != null && x.elapsedSecs - x.secs >= 5) extra.push(`Elapsed time ${durText(x.elapsedSecs)}, pauses and stops included.`);
   if (x.incline) extra.push(`Incline ${x.incline} %.`);
   if (x.kcal == null) extra.push('No calorie estimate: there was no weigh-in to base it on.');
-  if (x.gapSecs >= 30) extra.push(`GPS was lost for about ${durText(x.gapSecs)} (screen off, app in the background, or no signal). Distance across a gap is a straight line, so the real distance is a bit longer.`);
+  if (x.gapSecs >= 30) extra.push(`GPS had no usable signal for about ${durText(x.gapSecs)} while tracking. Distance across a gap is a straight line, and none is added for a gap at the very end, so the real distance is a bit longer.`);
   return `
     <div class="stats">
       ${statHtml('', kmText(x.dist), 'km')}
@@ -775,7 +800,7 @@ function cardioStartHtml() {
     ${segHtml('run-where', runWhere, [['gps', 'Outdoors, GPS'], ['timer', 'Treadmill, timer']], 'Where')}
     <button type="button" class="btn plate block" style="--plate:var(--plate-green);--plate-ink:#fff" data-action="${useGps ? 'run-start-gps' : 'run-start-timer'}">Start ${what}${useGps ? '' : ' timer'}</button>
     <p class="muted small" style="margin:10px 0 0">${useGps
-    ? 'Tracks distance, pace, speed and your route by GPS. Your phone will ask for location permission. The screen has to stay on with this app open the whole time, so it uses more battery than a normal run app. Nothing is sent anywhere.'
+    ? 'Tracks distance, pace, speed and your route by GPS. Your phone will ask for location permission. The screen has to stay on with this app open the whole time, so it uses more battery than a normal run app. If the phone locks or you switch apps, the run pauses until you tap Resume. Nothing is sent anywhere.'
     : 'Counts the time. You enter the distance or speed from the treadmill at the end.'}</p>`;
 }
 
@@ -879,9 +904,17 @@ document.addEventListener('toggle', (e) => {
   if (slot && run && !slot.innerHTML) slot.innerHTML = savedMapHtml(run);
 }, true);
 
-// Leaving the app mid-run: save what we have straight away, because tracking is about to stop.
+// Leaving the app mid-run: tracking is about to stop, so pause the run and save it now.
+// It stays paused until Resume is tapped. That tap is also what lets the phone hand the
+// wake lock and the sensors back. If the pause can't be saved, the run carries on in
+// memory as before and the time away shows up as a signal gap.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && db.activeRun && db.activeRun.gps && !db.activeRun.paused) save();
+  if (document.visibilityState !== 'hidden' || !db.activeRun || !db.activeRun.gps || db.activeRun.paused) return;
+  // Browsers also report "hidden" while a page reloads. When the app itself asked for the
+  // reload (another window saved), this window's copy is already dealt with: don't save again.
+  if (reloading) return;
+  pauseRun(true);
+  if (tab === 'today') render();
 });
 
 setInterval(updateRunScreen, 1000);

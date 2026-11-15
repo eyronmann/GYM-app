@@ -17,7 +17,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 4;
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -1089,6 +1089,7 @@ function importBackup(file) {
     }
     stopRest();
     stopGps();
+    stopSteps();
     recoverRun(); // a GPS run inside the backup comes back paused
     startupNotice = '';
     render();
@@ -2326,7 +2327,7 @@ const actions = {
     const typed = prompt('This deletes every workout, cardio session, weigh-in, food log and mobility entry on this phone. Type ERASE to confirm.');
     if (typed !== 'ERASE') return;
     if (!commit(() => { db = defaultData(); })) { render(); return; }
-    stopRest(); stopGps(); releaseWake();
+    stopRest(); stopGps(); stopSteps(); releaseWake();
     tab = 'today'; render(); toast('All data erased.');
   },
   install: async () => {

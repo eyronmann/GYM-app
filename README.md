@@ -19,7 +19,10 @@ no signal, and keeps everything on the phone.
 - **The screen must stay on with the app open.** A locked phone stops the
   tracking. Tap **Lock screen** before pocketing the phone.
 - There is no street map and there are no directions: the route is drawn on a
-  plain background. My location is never sent anywhere.
+  plain background, with the straight-line distance and direction back to where
+  I started. My location is never sent anywhere.
+- Steps are an estimate from the phone's movement and only show when the phone
+  is on my body. If the count isn't believable, none is saved.
 - **Treadmill:** start a timer and enter the distance at the end, or add a
   session by hand: distance or speed, time, and incline.
 - Shows pace (min/km), speed (km/h) and estimated calories. Calories are an

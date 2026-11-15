@@ -178,8 +178,16 @@ Don't promise or "fix" these. They are limits of a web page with no backend.
   recorded points on a plain background, with a scale bar and north up. A real
   map needs online tiles (which would be sent the user's position) or a map
   database far too large for this app; routing needs a road graph on top.
-- Location permission is requested only when a GPS run is started or resumed,
-  never at startup.
+- Location and motion permission are requested only when a GPS run is started
+  or resumed, never at startup.
+- There is no step-counter API. During a GPS run, steps are counted from the
+  motion sensor (`devicemotion`) and saved only when the count works out to
+  60 to 210 steps a minute over the moving time; otherwise `steps` is `null`
+  and the screen shows a dash. Never fill a missing count with a number derived
+  from pace. Steps are labelled "est.".
+- "Back to start" is the straight-line distance and compass direction to the
+  first recorded point, with a dashed line on the route drawing. It is not
+  navigation and the screen says so.
 - GPS filtering (constants at the top of `cardio.js`): fixes worse than 35 m
   are not recorded; movement smaller than 5 m, or half the fix's accuracy if
   that is larger, is treated as jitter; anything faster than 8 m/s is a jump and
@@ -214,8 +222,8 @@ timer, running workout clock, exercise library with search by muscle group,
 form cues, alternatives and video link, warm-up, mobility, posture and cooldown
 moves, ten routines to start, tick off and save, a mobility log with duration
 and notes, cardio (outdoor GPS runs and walks with distance, moving and elapsed time,
-current and average pace and speed, the route drawn on the phone, pause, resume
-and a touch lock; a timer and by-hand entry for the treadmill with distance,
+current and average pace and speed, the route drawn on the phone, a straight-line
+back-to-start guide, an estimated step count, pause, resume and a touch lock; a timer and by-hand entry for the treadmill with distance,
 time, speed and incline; estimated calories), body-weight log with 7-day average and
 chart, food log with built-in foods, own foods, daily totals and targets,
 history by workout, by exercise, for mobility and for cardio, program editor, JSON backup and restore.

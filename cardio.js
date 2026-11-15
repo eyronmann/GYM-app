@@ -23,6 +23,13 @@
     are no directions: both need an online map service or a map database far
     too big for this app, and an online service would be sent your location.
   - Location is asked for only when a GPS run is started or resumed.
+  - Browsers have no step counter. During a GPS run, footstrikes are counted
+    from the phone's motion sensor. The count is saved only when it works out
+    to a believable walking or running rhythm; otherwise no steps are saved.
+    It is an estimate, it depends on where the phone is carried, and it is
+    labelled "est.". Never replace a missing count with a number made up from pace.
+  - "Back to start" is the straight-line distance and compass direction to
+    where the run began. It is not a route and the screen says so.
 
   WHAT THE NUMBERS ARE
   - Distance comes from GPS fixes that pass the filters below.
@@ -48,6 +55,7 @@ let gps = { state: 'off', acc: null, here: null, msg: '' };
 let lastFixAt = null;      // time of the last good fix, used to spot gaps
 let lastRunSaveAt = 0;
 let touchLock = false;
+let stepState = null;      // motion-sensor step counting, while it is running
 let mapDrawn = '';         // what the live map last drew, so it is only redrawn when something changed
 
 /* ------------------------------------------------------------------ */
@@ -158,6 +166,7 @@ function startRun(useGps) {
     mapDrawn = '';
     lastFixAt = null;
     startGps(); // the phone asks for location permission here, not before
+    startSteps();
     keepAwake();
   }
   render();
@@ -192,6 +201,7 @@ function resumeRun() {
   if (ok && db.activeRun.gps) {
     lastFixAt = null;
     startGps();
+    startSteps();
     keepAwake();
   }
   return ok;
@@ -228,7 +238,7 @@ function finishGpsRun() {
       id: a.id, type: a.type, treadmill: false, startedAt: a.startedAt, finishedAt: new Date(end).toISOString(),
       secs, elapsedSecs: Math.max(secs, Math.round((end - (a.firstAt || end)) / 1000)),
       dist: Math.round(a.dist), incline: null, kcal: cardioKcal(a.type, a.dist, secs, a.kg, 0), kg: a.kg,
-      steps: null, gapSecs: Math.round(a.gapMs / 1000), route: simplifyRoute(a.pts),
+      steps: believableSteps(a, secs), gapSecs: Math.round(a.gapMs / 1000), route: simplifyRoute(a.pts),
     });
     db.activeRun = null;
   });
@@ -276,6 +286,7 @@ function discardRun(skipConfirm) {
 function endRun(msg) {
   touchLock = false;
   stopGps();
+  stopSteps();
   releaseWake();
   closeSheet();
   render();
@@ -360,6 +371,73 @@ function addPoint(r, here, t, acc) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Steps from the motion sensor (an estimate)                          */
+/* ------------------------------------------------------------------ */
+
+// Only ever called from a Start or Resume tap: iPhones grant the motion sensor only from a tap.
+function startSteps() {
+  if (stepState || !('DeviceMotionEvent' in window)) return;
+  const begin = () => {
+    if (stepState) return;
+    stepState = { avg: 9.8, up: false, lastAt: 0 };
+    window.addEventListener('devicemotion', onMotion);
+  };
+  if (typeof DeviceMotionEvent.requestPermission === 'function') {
+    DeviceMotionEvent.requestPermission().then((p) => { if (p === 'granted') begin(); }).catch(() => {});
+  } else begin();
+}
+
+function stopSteps() {
+  window.removeEventListener('devicemotion', onMotion);
+  stepState = null;
+}
+
+// Each footstrike is a bump in total acceleration above its running average.
+// At most one step per 280 ms, which allows up to about 210 steps a minute.
+function onMotion(e) {
+  const r = db.activeRun;
+  const a = e.accelerationIncludingGravity;
+  if (!r || !r.gps || r.paused || r.lastResumeAt == null || !stepState || !a || a.x == null) return;
+  const bump = Math.hypot(a.x, a.y, a.z) - stepState.avg;
+  stepState.avg += bump * 0.02;
+  const now = Date.now();
+  if (!stepState.up && bump > 1.5 && now - stepState.lastAt > 280) {
+    stepState.up = true;
+    stepState.lastAt = now;
+    r.steps += 1;
+  } else if (stepState.up && bump < 0.5) stepState.up = false;
+}
+
+// The sensor's count, or null when it doesn't work out to a believable rhythm
+// (no sensor, permission refused, phone not on the body). Null is saved as "not counted".
+function believableSteps(r, secs) {
+  const perMin = secs > 0 ? r.steps / (secs / 60) : 0;
+  return r.steps > 20 && perMin >= 60 && perMin <= 210 ? r.steps : null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Back to start (straight line only)                                  */
+/* ------------------------------------------------------------------ */
+
+const COMPASS = ['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west'];
+function compassTo(from, to) {
+  const rad = Math.PI / 180;
+  const dLng = (to[1] - from[1]) * rad;
+  const y = Math.sin(dLng) * Math.cos(to[0] * rad);
+  const x = Math.cos(from[0] * rad) * Math.sin(to[0] * rad) - Math.sin(from[0] * rad) * Math.cos(to[0] * rad) * Math.cos(dLng);
+  const deg = ((Math.atan2(y, x) / rad) + 360) % 360;
+  return COMPASS[Math.round(deg / 45) % 8];
+}
+function homeText(r) {
+  const here = liveHere(r);
+  if (!here || !r.pts.length) return '';
+  const d = metresBetween(here, r.pts[0]);
+  if (d < 30) return 'You are at your start point.';
+  const far = d >= 1000 ? `${(d / 1000).toFixed(2)} km` : `${Math.round(d / 10) * 10} m`;
+  return `Your start point is ${far} to the ${compassTo(here, r.pts[0])}, in a straight line.`;
+}
+
+/* ------------------------------------------------------------------ */
 /* Route drawing (on this phone, no map service)                       */
 /* ------------------------------------------------------------------ */
 
@@ -381,7 +459,7 @@ function mapView(points, minSpan) {
   return { lat0, lng0, kx, ky, scale };
 }
 
-function mapInnerSvg(segs, here) {
+function mapInnerSvg(segs, here, homeLine) {
   const all = segs.flat().concat(here ? [here] : []);
   if (!all.length) return '';
   const v = mapView(all, 120);
@@ -398,7 +476,8 @@ function mapInnerSvg(segs, here) {
   // Scale bar: the longest round distance that fits in about 100 px.
   const bar = [5000, 2000, 1000, 500, 200, 100, 50, 20, 10].find((m) => m * v.scale <= 100) || 10;
   const barPx = (bar * v.scale).toFixed(1);
-  return `${lines.map((l) => `<polyline points="${l}" class="route-edge"/>`).join('')}
+  return `${homeLine && here && first ? `<polyline points="${px(here)} ${px(first)}" class="home-line"/>` : ''}
+    ${lines.map((l) => `<polyline points="${l}" class="route-edge"/>`).join('')}
     ${lines.map((l) => `<polyline points="${l}" class="route"/>`).join('')}
     ${first ? dot(first, 'pin-start') : ''}${end ? dot(end, here ? 'pin-here' : 'pin-end') : ''}
     <path d="M14 ${MAP_H - 14} h${barPx}" class="scale-bar"/><text x="14" y="${MAP_H - 22}" class="map-text">${bar >= 1000 ? `${bar / 1000} km` : `${bar} m`}</text>
@@ -406,13 +485,13 @@ function mapInnerSvg(segs, here) {
 }
 
 function mapHtml(segs, here, live) {
-  const inner = mapInnerSvg(segs, here);
+  const inner = mapInnerSvg(segs, here, live);
   if (!inner) return '';
   const where = live && here ? `You are at <span class="num">${here[0].toFixed(5)}, ${here[1].toFixed(5)}</span>${gps.acc != null ? ` (within about ${gps.acc} m)` : ''}. ` : '';
   return `
     <figure class="map-card">
       <svg viewBox="0 0 ${MAP_W} ${MAP_H}" class="map" role="img" aria-label="Your route"><g${live ? ' id="run-map"' : ''}>${inner}</g></svg>
-      <figcaption class="muted small">${live ? `<span id="run-where">${where}</span>` : ''}Green is the start${live ? ', blue is you' : ', red is the finish'}. Drawn on this phone from your GPS points, north up. There is no street map behind it.</figcaption>
+      <figcaption class="muted small">${live ? `<span id="run-where">${where}</span>` : ''}Green is the start${live ? ', blue is you, and the dashed line points straight back to the start' : ', red is the finish'}. Drawn on this phone from your GPS points, north up. There is no street map behind it.</figcaption>
     </figure>`;
 }
 
@@ -560,10 +639,11 @@ function runNumbers(r) {
   const now = recentSpeed(r);
   const kcal = cardioKcal(r.type, r.dist, secs, r.kg, 0);
   const wall = r.firstAt ? (Date.now() - r.firstAt) / 1000 : 0;
+  const steps = believableSteps(r, secs);
   return {
     dist: kmText(r.dist), time: durText(secs), elapsed: durText(wall), pace: paceText(avg), now: paceText(now),
     speed: speedText(now), avg: speedText(avg), kcal: kcal == null ? '–' : kcalText(kcal),
-    acc: gps.acc == null || r.paused ? '–' : `±${gps.acc}`, gps: gpsLine(r),
+    steps: steps == null ? '–' : steps.toLocaleString(), gps: gpsLine(r), home: homeText(r),
   };
 }
 
@@ -580,7 +660,7 @@ function updateRunScreen() {
   const key = `${r.pts.length}|${here ? here.join(',') : ''}|${gps.acc}`;
   if (key === mapDrawn) return;
   mapDrawn = key;
-  map.innerHTML = mapInnerSvg(liveSegs(r), here);
+  map.innerHTML = mapInnerSvg(liveSegs(r), here, true);
   const where = document.getElementById('run-where');
   if (where && here) where.innerHTML = `You are at <span class="num">${here[0].toFixed(5)}, ${here[1].toFixed(5)}</span>${gps.acc != null ? ` (within about ${gps.acc} m)` : ''}. `;
 }
@@ -626,11 +706,12 @@ function viewGpsRun(r) {
         ${statHtml('speed', n.speed, 'km/h now')}
         ${statHtml('avg', n.avg, 'avg km/h')}
         ${statHtml('kcal', n.kcal, 'kcal (est.)')}
-        ${statHtml('acc', n.acc, 'GPS, metres')}
+        ${statHtml('steps', n.steps, 'steps (est.)')}
       </div>
       ${r.kg ? '' : '<p class="muted small" style="margin:10px 0 0">No calories, because there is no weigh-in yet. Log one in Body before your next run.</p>'}
     </section>
     <div style="margin-top:12px">${mapHtml(liveSegs(r), liveHere(r), true) || '<div class="card muted small" id="run-nomap">Your route appears here once GPS finds you.</div>'}</div>
+    <p class="small" style="margin:10px 0 0"><strong data-rs="home">${esc(n.home)}</strong> <span class="muted">That is a direction, not a route: this app has no streets.</span></p>
     <div class="finish-bar">
       <div class="two-col">
         <button type="button" class="btn" data-action="${r.paused ? 'run-resume' : 'run-pause'}">${r.paused ? 'Resume' : 'Pause'}</button>
@@ -639,7 +720,7 @@ function viewGpsRun(r) {
       <button type="button" class="btn primary block" data-action="run-finish">Finish and save</button>
       <button type="button" class="btn danger block" data-action="run-discard">Discard</button>
     </div>
-    <p class="muted small" style="margin-top:14px">Keep this screen on and the app open. Locking the phone or switching apps stops the tracking. Use Lock screen before putting the phone in a pocket or armband. Your location stays on this phone.</p>`;
+    <p class="muted small" style="margin-top:14px">Keep this screen on and the app open. Locking the phone or switching apps stops the tracking. Use Lock screen before putting the phone in a pocket or armband. Steps are counted from the phone's movement, so they only show when the phone is on your body, and they are an estimate. Your location stays on this phone.</p>`;
 }
 
 function viewRun() {

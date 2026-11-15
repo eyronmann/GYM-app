@@ -253,7 +253,7 @@ details.card[open] > summary { margin-bottom: 10px; }
 
 /* ---------- toast ---------- */
 .toast {
-  position: fixed; left: 50%; transform: translateX(-50%); z-index: 20;
+  position: fixed; left: 50%; transform: translateX(-50%); z-index: 40; /* above the run touch lock, so a failed save is still seen */
   top: calc(var(--safe-t) + 12px);
   max-width: calc(100% - 32px);
   background: var(--chalk); color: var(--floor);
@@ -426,6 +426,7 @@ ol.cues { padding-left: 22px; }
 .map .pin-start { fill: var(--plate-green); stroke: #fff; stroke-width: 2; }
 .map .pin-end { fill: var(--plate-red); stroke: #fff; stroke-width: 2; }
 .map .pin-here { fill: var(--plate-blue); stroke: #fff; stroke-width: 3; }
+.map .home-line { fill: none; stroke: var(--dust); stroke-width: 2; stroke-dasharray: 5 6; }
 .map .scale-bar { fill: none; stroke: var(--dust); stroke-width: 3; stroke-linecap: square; }
 .map .map-text { fill: var(--dust); font-size: 12px; font-weight: 650; }
 .map-card figcaption { margin-top: 6px; }

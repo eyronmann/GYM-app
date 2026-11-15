@@ -17,7 +17,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 4;
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.2.0';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -912,7 +912,9 @@ function stopRest() {
 
 let wakeLock = null;
 async function keepAwake() {
-  if (!db.active || !db.settings.keepAwake || wakeLock || !('wakeLock' in navigator)) return;
+  // A GPS run always needs the screen on: tracking stops when the phone locks.
+  const wanted = (db.activeRun && db.activeRun.gps && gpsWatch != null) || (db.active && db.settings.keepAwake);
+  if (!wanted || wakeLock || !('wakeLock' in navigator)) return;
   try {
     wakeLock = await navigator.wakeLock.request('screen');
     wakeLock.addEventListener('release', () => { wakeLock = null; });
@@ -1086,6 +1088,8 @@ function importBackup(file) {
       return;
     }
     stopRest();
+    stopGps();
+    recoverRun(); // a GPS run inside the backup comes back paused
     startupNotice = '';
     render();
     toast('Backup restored. Your previous data was kept as a safety copy.');
@@ -1689,7 +1693,7 @@ function viewData() {
   return `
     <section class="card">
       <h3>Backup</h3>
-      <p class="muted small" style="margin-top:4px">Your workouts, cardio, weigh-ins, food logs and mobility log are stored only on this phone. Clearing browser data or losing the phone erases them unless you have a backup file. ${last}</p>
+      <p class="muted small" style="margin-top:4px">Your workouts, cardio, weigh-ins, food logs and mobility log are stored only on this phone. Clearing browser data or losing the phone erases them unless you have a backup file. The backup includes the routes of your GPS runs, so it shows where you run: share it with care. ${last}</p>
       <div class="stack">
         ${canShareFiles() ? '<button type="button" class="btn primary block" data-action="share">Send backup to Drive or a chat</button>' : ''}
         <button type="button" class="btn block ${canShareFiles() ? '' : 'primary'}" data-action="export">Download backup file</button>
@@ -2322,7 +2326,7 @@ const actions = {
     const typed = prompt('This deletes every workout, cardio session, weigh-in, food log and mobility entry on this phone. Type ERASE to confirm.');
     if (typed !== 'ERASE') return;
     if (!commit(() => { db = defaultData(); })) { render(); return; }
-    stopRest(); releaseWake();
+    stopRest(); stopGps(); releaseWake();
     tab = 'today'; render(); toast('All data erased.');
   },
   install: async () => {
@@ -2544,6 +2548,7 @@ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+recoverRun();
 if (db.activeRun) todayMode = 'cardio';
 render();
 if (db.active) keepAwake();

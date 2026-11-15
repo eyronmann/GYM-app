@@ -20,6 +20,8 @@ hosted as static files on GitHub Pages.
 3. **Works offline.** No CDN links, web fonts, remote scripts or online food or
    exercise APIs. Everything the app needs is in this repo and listed in `sw.js`.
    (The "Watch form videos" link opens YouTube; that is the one online extra.)
+   This covers maps too: no map tiles, no map or routing service, no links that
+   carry the user's position. **Location never leaves the phone.**
 4. **Never lose data.** This outranks every other rule:
    - Do not rename `STORAGE_KEY` or rename/remove fields in saved data.
    - Any change to the data shape goes through `migrate()` in `app.js`, and
@@ -39,7 +41,7 @@ hosted as static files on GitHub Pages.
 | `index.html` | Page shell: top bar, main view, rest-timer bar, bottom sheet, tab bar |
 | `styles.css` | All styling. Colours are CSS variables at the top |
 | `app.js` | All logic: data, rotation, logging, swap, rest timer, workout clock, weight, food, history, program editor, backup |
-| `cardio.js` | Runs and walks: timer, by-hand entry (treadmill), pace, speed, calorie estimate, the cardio screens. Loaded before `app.js` and uses its helpers inside functions |
+| `cardio.js` | Runs and walks: GPS tracking and its filters, timer, by-hand entry (treadmill), pace, speed, calorie estimate, the route drawing, the cardio screens. Loaded before `app.js` and uses its helpers inside functions |
 | `data/routines.js` | Warm-up, mobility, posture and cooldown moves (`window.MOVES`: steps, what to avoid, equipment, alternatives) and the routines built from them (`window.ROUTINES`) |
 | `data/exercises.js` | Built-in exercise library (`window.EXERCISES`): name, muscle group, equipment, form cues, alternatives |
 | `data/foods.js` | Built-in food list (`window.FOODS`): per-serving calories, protein, carbs, fat |
@@ -105,6 +107,14 @@ Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
 - Mobility log entries copy the routine's and moves' names for the same reason,
   so names and ids in `data/routines.js` can change without touching history.
 - A lifting workout and a cardio session can't be in progress at the same time.
+- A GPS run's `pts` grow by about one point every few metres. They are saved
+  every 10 seconds while tracking (a direct `save()`, like typing: if it fails
+  the run stays on screen and the toast says so). On Finish the route is thinned
+  to about 200 points, because `localStorage` holds roughly 5 MB in total.
+  Never store full-resolution tracks in `runs`.
+- A GPS run found unpaused at startup (the app was closed mid-run) is paused at
+  its last recorded point and marked `recovered`. GPS is not switched back on
+  until Resume is tapped.
 - A timed cardio session (`gps: false`) runs on the wall clock, so it keeps
   counting through a locked phone or a reload. Finish pauses it and opens the
   by-hand form; the session is cleared only when that form saves.
@@ -155,6 +165,30 @@ Tabs: Today (Lift or Cardio), Exercises (lifts, or mobility and posture), Body
 - Restoring a backup aborts if the current data can't be read; a failed read is
   never treated as an empty phone.
 
+## Cardio: limits of a web app
+
+Don't promise or "fix" these. They are limits of a web page with no backend.
+
+- GPS stops when the phone is locked or another app is in front. A GPS run
+  keeps the screen awake (Wake Lock; a notice appears where the browser lacks
+  it), and the in-app "Lock screen" stops pocket touches. Background tracking
+  needs a native app. Gaps are recorded in `gapSecs` and shown, and the distance
+  across a gap is the straight line between the fixes.
+- No street map and no directions. The route is drawn as an SVG from the
+  recorded points on a plain background, with a scale bar and north up. A real
+  map needs online tiles (which would be sent the user's position) or a map
+  database far too large for this app; routing needs a road graph on top.
+- Location permission is requested only when a GPS run is started or resumed,
+  never at startup.
+- GPS filtering (constants at the top of `cardio.js`): fixes worse than 35 m
+  are not recorded; movement smaller than 5 m, or half the fix's accuracy if
+  that is larger, is treated as jitter; anything faster than 8 m/s is a jump and
+  is dropped; no progress for 15 s followed by less than 0.5 m/s counts as
+  standing still and is left out of moving time.
+- Tested only in desktop Chrome at 390 px with simulated GPS. Behaviour on a
+  real phone (time to first fix, drift between buildings, battery use, iPhone
+  Safari's wake lock) is not verified until the owner tries it.
+
 ## Built-in data accuracy
 
 - `data/routines.js` moves need a wall, a bench, the floor or nothing. Every
@@ -179,12 +213,15 @@ numbers and an "add weight" hint, swap to an alternative mid-workout, rest
 timer, running workout clock, exercise library with search by muscle group,
 form cues, alternatives and video link, warm-up, mobility, posture and cooldown
 moves, ten routines to start, tick off and save, a mobility log with duration
-and notes, cardio (run and walk timer, by-hand treadmill entry with distance,
-time, speed and incline, pace, speed, estimated calories), body-weight log with 7-day average and
+and notes, cardio (outdoor GPS runs and walks with distance, moving and elapsed time,
+current and average pace and speed, the route drawn on the phone, pause, resume
+and a touch lock; a timer and by-hand entry for the treadmill with distance,
+time, speed and incline; estimated calories), body-weight log with 7-day average and
 chart, food log with built-in foods, own foods, daily totals and targets,
 history by workout, by exercise, for mobility and for cardio, program editor, JSON backup and restore.
 
-Not planned unless the owner asks: accounts or sync, social features, AI
+Not planned unless the owner asks: background GPS, heart rate, a street map or
+turn-by-turn directions (see the cardio limits above), accounts or sync, social features, AI
 coaching, notifications, micronutrients, barcode scanning.
 
 ## How the AIs work together

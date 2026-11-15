@@ -14,8 +14,14 @@ no signal, and keeps everything on the phone.
 - **Swap** replaces an exercise with an alternative when a machine is taken.
 
 **Cardio** (Today → Cardio)
-- Run or walk. Start a timer and enter the distance at the end, or add a session
-  by hand: distance or speed, time, and treadmill incline.
+- **Outdoors, GPS:** tracks distance, moving and elapsed time, current and
+  average pace and speed, and draws my route. Pause, resume, finish.
+- **The screen must stay on with the app open.** A locked phone stops the
+  tracking. Tap **Lock screen** before pocketing the phone.
+- There is no street map and there are no directions: the route is drawn on a
+  plain background. My location is never sent anywhere.
+- **Treadmill:** start a timer and enter the distance at the end, or add a
+  session by hand: distance or speed, time, and incline.
 - Shows pace (min/km), speed (km/h) and estimated calories. Calories are an
   estimate (ACSM equations and my latest weigh-in), off by 10 to 20 percent.
 

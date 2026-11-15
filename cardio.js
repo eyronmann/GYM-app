@@ -5,26 +5,63 @@
   Loaded before app.js. It uses app.js's helpers (db, commit, render, toast,
   esc, uid, ...) only inside functions, which run after app.js has loaded.
 
-  Saving follows AGENTS.md: every button goes through commit().
+  Saving follows AGENTS.md: every button goes through commit(). The one
+  exception is the save every 10 seconds while GPS points arrive, which calls
+  save() directly, like typing does. If that save fails the run stays on
+  screen and the toast says so.
 
   Always read db.activeRun fresh. commit() replaces db when a save fails, so a
   run object kept in a variable across a commit can be a stale copy.
 
+  WHAT A WEB APP CAN AND CAN'T DO HERE (read before "fixing" any of it)
+  - GPS only works while this app is open with the screen on. A locked phone
+    or another app in front stops the tracking. So a GPS run keeps the screen
+    awake, and "Lock screen" covers it so a pocket can't press buttons.
+    Background tracking needs a native app.
+  - Nothing here uses the network. The route is drawn on this phone from the
+    recorded points, on a plain background. There is no street map and there
+    are no directions: both need an online map service or a map database far
+    too big for this app, and an online service would be sent your location.
+  - Location is asked for only when a GPS run is started or resumed.
+
   WHAT THE NUMBERS ARE
-  - Pace and speed are distance divided by moving time.
+  - Distance comes from GPS fixes that pass the filters below.
+  - Elapsed time is the wall clock from the first fix to Finish. Moving time
+    leaves out pauses and standing still. Pace and speed use moving time.
   - Calories are an estimate from the ACSM walking and running equations, using
     the latest weigh-in. Expect it to be off by 10 to 20 percent. Every screen
     labels it "est." and must keep doing so.
 */
 
+const GPS_MAX_ACCURACY = 35;   // metres: fixes worse than this are not recorded
+const GPS_MIN_STEP = 5;        // metres: smaller movement is GPS jitter. Half the fix's accuracy is used if that is larger
+const GPS_MAX_SPEED = 8;       // metres per second (about 29 km/h): faster than this is a GPS jump
+const GPS_GAP_MS = 20000;      // no fix for this long counts as a gap (screen off, or no signal)
+const STOP_AFTER_MS = 15000;   // no progress for this long, then slower than STOP_SPEED, counts as standing still
+const STOP_SPEED = 0.5;        // metres per second
+const ROUTE_MAX_POINTS = 200;  // saved routes are thinned to about this many points to save storage
 const RUN_NAMES = { run: 'Run', walk: 'Walk' };
 let runType = 'run';
+let runWhere = 'gps';      // 'gps' outdoors, or 'timer' for a treadmill
+let gpsWatch = null;
+let gps = { state: 'off', acc: null, here: null, msg: '' };
+let lastFixAt = null;      // time of the last good fix, used to spot gaps
+let lastRunSaveAt = 0;
+let touchLock = false;
+let mapDrawn = '';         // what the live map last drew, so it is only redrawn when something changed
 
 /* ------------------------------------------------------------------ */
 /* Numbers                                                             */
 /* ------------------------------------------------------------------ */
 
-const clampNum = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+function metresBetween(a, b) {
+  const rad = Math.PI / 180;
+  const dLat = (b[0] - a[0]) * rad;
+  const dLng = (b[1] - a[1]) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 const kmText = (m) => (m / 1000).toFixed(2);
 function durText(secs) {
   const s = Math.max(0, Math.floor(secs + 0.001));
@@ -70,8 +107,36 @@ function cardioKcal(type, metres, secs, kg, inclinePct) {
 function runClockMs(r) {
   return r.activeMs + (!r.paused && r.lastResumeAt ? Date.now() - r.lastResumeAt : 0);
 }
+// How long a GPS run has made no progress right now, if that is long enough to count as standing still.
+function idleMs(r) {
+  if (!r.gps || r.paused || !r.lastResumeAt || !r.pts.length) return 0;
+  const idle = Date.now() - Math.max(r.pts[r.pts.length - 1][2], r.lastResumeAt);
+  return idle > STOP_AFTER_MS ? idle : 0;
+}
 // Moving time: the clock minus time spent standing still (only GPS can tell).
-const runMovingMs = (r) => Math.max(0, runClockMs(r) - r.stoppedMs);
+const runMovingMs = (r) => Math.max(0, runClockMs(r) - r.stoppedMs - idleMs(r));
+
+// Speed over the last 30 seconds, in metres per second. Falls to 0 when you stop.
+function recentSpeed(r) {
+  if (r.paused || r.pts.length < 2) return 0;
+  const now = Date.now();
+  const from = now - 30000;
+  let d = 0;
+  let oldest = null;
+  for (let i = r.pts.length - 1; i > 0; i--) {
+    const p = r.pts[i];
+    if (p[2] < from) break;
+    oldest = p;
+    if (p[3]) break; // start of a stretch: nothing before it joins up
+    const q = r.pts[i - 1];
+    if (q[2] < from) break;
+    d += metresBetween(q, p);
+    oldest = q;
+  }
+  if (!oldest) return 0;
+  const secs = (now - oldest[2]) / 1000;
+  return secs >= 5 ? d / secs : 0;
+}
 
 function newRun(gps) {
   const now = Date.now();
@@ -84,10 +149,17 @@ function newRun(gps) {
   };
 }
 
-function startRun(gps) {
+function startRun(useGps) {
   if (db.active) { toast('Finish or discard your workout first.'); return false; }
   if (db.activeRun) return false;
-  const ok = commit(() => { db.activeRun = newRun(gps); });
+  if (useGps && !('geolocation' in navigator)) { toast("This browser can't read GPS. Use the timer instead."); return false; }
+  const ok = commit(() => { db.activeRun = newRun(useGps); });
+  if (ok && useGps) {
+    mapDrawn = '';
+    lastFixAt = null;
+    startGps(); // the phone asks for location permission here, not before
+    keepAwake();
+  }
   render();
   if (ok) window.scrollTo(0, 0);
   return ok;
@@ -96,6 +168,7 @@ function startRun(gps) {
 // Stop the clock on a run object (no saving here; callers do it inside commit()).
 function stopClock(r) {
   if (r.paused) return;
+  r.stoppedMs += idleMs(r); // standing still right up to the pause
   if (r.lastResumeAt) r.activeMs += Date.now() - r.lastResumeAt;
   r.lastResumeAt = null;
   r.paused = true;
@@ -108,7 +181,7 @@ function pauseRun() {
 
 function resumeRun() {
   if (!db.activeRun || !db.activeRun.paused) return false;
-  return commit(() => {
+  const ok = commit(() => {
     const r = db.activeRun;
     r.paused = false;
     r.recovered = false;
@@ -116,6 +189,69 @@ function resumeRun() {
     r.lastResumeAt = !r.gps || r.pts.length ? Date.now() : null;
     r.breakNext = r.pts.length > 0;
   });
+  if (ok && db.activeRun.gps) {
+    lastFixAt = null;
+    startGps();
+    keepAwake();
+  }
+  return ok;
+}
+
+// Thin a recorded track into saved stretches: [ [ [lat, lng], ... ], ... ]. A pause starts a new stretch.
+function simplifyRoute(pts) {
+  const segs = [];
+  pts.forEach((p) => {
+    if (p[3] || !segs.length) segs.push([]);
+    segs[segs.length - 1].push([p[0], p[1]]);
+  });
+  const every = Math.max(1, Math.ceil(pts.length / ROUTE_MAX_POINTS));
+  return segs
+    .map((seg) => seg.filter((_, i) => i % every === 0 || i === seg.length - 1))
+    .filter((seg) => seg.length > 1);
+}
+
+function finishGpsRun() {
+  const r = db.activeRun;
+  if (!r) return;
+  if (r.dist < 50) {
+    if (confirm('Less than 50 m was tracked, so there is nothing to save. Discard this session?')) discardRun(true);
+    return;
+  }
+  const name = RUN_NAMES[r.type];
+  // If storage refuses, commit() puts the run back exactly as it was, still in progress.
+  const ok = commit(() => {
+    const a = db.activeRun;
+    const end = Date.now();
+    stopClock(a);
+    const secs = Math.max(1, Math.round((a.activeMs - a.stoppedMs) / 1000));
+    db.runs.push({
+      id: a.id, type: a.type, treadmill: false, startedAt: a.startedAt, finishedAt: new Date(end).toISOString(),
+      secs, elapsedSecs: Math.max(secs, Math.round((end - (a.firstAt || end)) / 1000)),
+      dist: Math.round(a.dist), incline: null, kcal: cardioKcal(a.type, a.dist, secs, a.kg, 0), kg: a.kg,
+      steps: null, gapSecs: Math.round(a.gapMs / 1000), route: simplifyRoute(a.pts),
+    });
+    db.activeRun = null;
+  });
+  if (ok) endRun(`${name} saved.`);
+  else render();
+}
+
+// Called once when the app opens (and after a restore). A GPS run left going when the app
+// closed is paused at its last recorded point, so the missing time isn't counted as running.
+// GPS is not switched back on here: that happens when Resume is tapped.
+function recoverRun() {
+  const r = db.activeRun;
+  if (!r || !r.gps || r.paused) return;
+  const pauseAtLastPoint = () => {
+    const a = db.activeRun;
+    const lastT = a.pts.length ? a.pts[a.pts.length - 1][2] : null;
+    if (a.lastResumeAt && lastT && lastT > a.lastResumeAt) a.activeMs += lastT - a.lastResumeAt;
+    a.lastResumeAt = null;
+    a.paused = true;
+    a.recovered = true;
+  };
+  // If this can't be saved, still pause what is on screen: a clock that counted the time the app was closed would be wrong.
+  if (!commit(pauseAtLastPoint)) pauseAtLastPoint();
 }
 
 // A timed session has no distance yet: pause it and ask for the numbers.
@@ -138,11 +274,160 @@ function discardRun(skipConfirm) {
 
 // Tidy up after a session has been saved or discarded.
 function endRun(msg) {
+  touchLock = false;
+  stopGps();
+  releaseWake();
   closeSheet();
   render();
   window.scrollTo(0, 0);
   if (msg) toast(msg);
 }
+
+/* ------------------------------------------------------------------ */
+/* GPS                                                                 */
+/* ------------------------------------------------------------------ */
+
+function startGps() {
+  if (gpsWatch != null) return;
+  if (!('geolocation' in navigator)) { gps = { state: 'error', acc: null, here: null, msg: "This browser can't read GPS." }; return; }
+  gps = { state: 'waiting', acc: null, here: gps.here, msg: '' };
+  gpsWatch = navigator.geolocation.watchPosition(onFix, onGpsError, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+}
+
+function stopGps() {
+  if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch);
+  gpsWatch = null;
+  lastFixAt = null;
+  gps = { state: 'off', acc: null, here: null, msg: '' };
+}
+
+function onFix(pos) {
+  const c = pos.coords;
+  if (!Number.isFinite(c.latitude) || !Number.isFinite(c.longitude) || !Number.isFinite(c.accuracy)) return;
+  const here = [+c.latitude.toFixed(5), +c.longitude.toFixed(5)];
+  const good = c.accuracy <= GPS_MAX_ACCURACY;
+  const firstFix = gps.state !== 'ok' && gps.state !== 'weak';
+  gps = { state: good ? 'ok' : 'weak', acc: Math.round(c.accuracy), here, msg: '' };
+  const r = db.activeRun;
+  if (r && r.gps && !r.paused && good) {
+    const wasWaiting = r.lastResumeAt == null;
+    addPoint(r, here, Date.now(), c.accuracy);
+    if (Date.now() - lastRunSaveAt > 10000) { lastRunSaveAt = Date.now(); save(); }
+    if (wasWaiting) { render(); return; }
+  }
+  if (firstFix && r) { render(); return; }
+  updateRunScreen();
+}
+
+function onGpsError(err) {
+  const denied = err && err.code === 1;
+  gps = {
+    state: denied ? 'error' : gps.state === 'off' ? 'off' : 'waiting', acc: null, here: gps.here,
+    msg: denied ? 'Location is blocked for this app. Allow it in your phone or browser settings, then pause and resume.' : '',
+  };
+  if (denied) {
+    if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch);
+    gpsWatch = null;
+    if (tab === 'today') render();
+  } else updateRunScreen();
+}
+
+// Record one good fix. The clock starts at the first one, so waiting for GPS doesn't hurt your pace.
+function addPoint(r, here, t, acc) {
+  if (r.lastResumeAt == null) r.lastResumeAt = t;
+  if (r.firstAt == null) r.firstAt = t;
+  const gap = lastFixAt != null && t - lastFixAt > GPS_GAP_MS ? t - lastFixAt : 0;
+  lastFixAt = t;
+  if (gap) r.gapMs += gap;
+  const last = r.pts[r.pts.length - 1];
+  if (!last) { r.pts.push([here[0], here[1], t]); return; }
+  if (r.breakNext) {
+    // First fix after a pause: start a new stretch without joining it to the old one.
+    r.pts.push([here[0], here[1], t, 1]);
+    r.breakNext = false;
+    return;
+  }
+  const d = metresBetween(last, here);
+  const ms = t - last[2];
+  // Standing still, GPS wanders by a few metres. Ignore movement it can't tell from that.
+  if (d < Math.max(GPS_MIN_STEP, acc / 2)) return;
+  if (ms > 0 && d / (ms / 1000) > GPS_MAX_SPEED) return;
+  // A long wait followed by a few metres was standing still, not moving.
+  // (After a signal gap the distance is the straight line between the two fixes: the least you covered.)
+  if (ms > STOP_AFTER_MS && d / (ms / 1000) < STOP_SPEED) r.stoppedMs += ms;
+  r.dist += d;
+  r.pts.push([here[0], here[1], t]);
+}
+
+/* ------------------------------------------------------------------ */
+/* Route drawing (on this phone, no map service)                       */
+/* ------------------------------------------------------------------ */
+
+const MAP_W = 358;
+const MAP_H = 240;
+
+// Fit points into the picture. At the size of a run the ground is flat enough to treat
+// latitude and longitude as a grid in metres. minSpan stops a tiny track filling the frame.
+function mapView(points, minSpan) {
+  const lats = points.map((p) => p[0]);
+  const lngs = points.map((p) => p[1]);
+  const lat0 = (Math.min(...lats) + Math.max(...lats)) / 2;
+  const lng0 = (Math.min(...lngs) + Math.max(...lngs)) / 2;
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180); // metres per degree of longitude here
+  const ky = 110540;                                    // metres per degree of latitude
+  const w = Math.max(minSpan, (Math.max(...lngs) - Math.min(...lngs)) * kx);
+  const h = Math.max(minSpan, (Math.max(...lats) - Math.min(...lats)) * ky);
+  const scale = Math.min((MAP_W - 56) / w, (MAP_H - 56) / h); // pixels per metre
+  return { lat0, lng0, kx, ky, scale };
+}
+
+function mapInnerSvg(segs, here) {
+  const all = segs.flat().concat(here ? [here] : []);
+  if (!all.length) return '';
+  const v = mapView(all, 120);
+  const px = (p) => `${(MAP_W / 2 + (p[1] - v.lng0) * v.kx * v.scale).toFixed(1)},${(MAP_H / 2 - (p[0] - v.lat0) * v.ky * v.scale).toFixed(1)}`;
+  const dot = (p, cls) => { const [x, y] = px(p).split(','); return `<circle cx="${x}" cy="${y}" r="6" class="${cls}"/>`; };
+  // Long live tracks are drawn from every nth point so redrawing stays quick.
+  const lines = segs.filter((s) => s.length > 1).map((s) => {
+    const every = Math.max(1, Math.ceil(s.length / 400));
+    return s.filter((_, i) => i % every === 0 || i === s.length - 1).map(px).join(' ');
+  });
+  const first = segs.length && segs[0].length ? segs[0][0] : null;
+  const lastSeg = segs[segs.length - 1];
+  const end = here || (lastSeg && lastSeg.length ? lastSeg[lastSeg.length - 1] : null);
+  // Scale bar: the longest round distance that fits in about 100 px.
+  const bar = [5000, 2000, 1000, 500, 200, 100, 50, 20, 10].find((m) => m * v.scale <= 100) || 10;
+  const barPx = (bar * v.scale).toFixed(1);
+  return `${lines.map((l) => `<polyline points="${l}" class="route-edge"/>`).join('')}
+    ${lines.map((l) => `<polyline points="${l}" class="route"/>`).join('')}
+    ${first ? dot(first, 'pin-start') : ''}${end ? dot(end, here ? 'pin-here' : 'pin-end') : ''}
+    <path d="M14 ${MAP_H - 14} h${barPx}" class="scale-bar"/><text x="14" y="${MAP_H - 22}" class="map-text">${bar >= 1000 ? `${bar / 1000} km` : `${bar} m`}</text>
+    <text x="${MAP_W - 14}" y="24" text-anchor="end" class="map-text">N ↑</text>`;
+}
+
+function mapHtml(segs, here, live) {
+  const inner = mapInnerSvg(segs, here);
+  if (!inner) return '';
+  const where = live && here ? `You are at <span class="num">${here[0].toFixed(5)}, ${here[1].toFixed(5)}</span>${gps.acc != null ? ` (within about ${gps.acc} m)` : ''}. ` : '';
+  return `
+    <figure class="map-card">
+      <svg viewBox="0 0 ${MAP_W} ${MAP_H}" class="map" role="img" aria-label="Your route"><g${live ? ' id="run-map"' : ''}>${inner}</g></svg>
+      <figcaption class="muted small">${live ? `<span id="run-where">${where}</span>` : ''}Green is the start${live ? ', blue is you' : ', red is the finish'}. Drawn on this phone from your GPS points, north up. There is no street map behind it.</figcaption>
+    </figure>`;
+}
+
+const savedMapHtml = (run) => (run.route.length ? mapHtml(run.route, null, false) : '');
+
+// The track of the run in progress as stretches of points.
+function liveSegs(r) {
+  const segs = [];
+  r.pts.forEach((p) => {
+    if (p[3] || !segs.length) segs.push([]);
+    segs[segs.length - 1].push(p);
+  });
+  return segs;
+}
+const liveHere = (r) => gps.here || (r.pts.length ? r.pts[r.pts.length - 1] : null);
 
 /* ------------------------------------------------------------------ */
 /* Entering a session by hand (treadmill, or anything not tracked)     */
@@ -259,21 +544,107 @@ function statHtml(key, value, label, cls) {
 
 const runPlace = (x) => (x.treadmill ? 'treadmill' : x.route.length ? 'GPS' : 'outdoors');
 
-// The numbers on the screen of a session in progress.
-function runNumbers(r) {
-  return { time: durText(runMovingMs(r) / 1000) };
+function gpsLine(r) {
+  if (gps.state === 'error') return gps.msg;
+  if (r.paused) return r.recovered ? 'Paused, because the app was closed mid-run. Tap Resume to carry on.' : 'Paused.';
+  if (gps.state === 'ok') return `GPS locked, accurate to about ${gps.acc} m.`;
+  if (gps.state === 'weak') return `Weak GPS (about ${gps.acc} m off). Move into the open. Nothing is recorded until it improves.`;
+  return 'Looking for GPS. Stand in the open for a moment.';
 }
 
-// Runs once a second: update the numbers without rebuilding the screen.
+// The numbers on the screen of a session in progress.
+function runNumbers(r) {
+  const secs = runMovingMs(r) / 1000;
+  if (!r.gps) return { time: durText(secs) };
+  const avg = secs > 0 ? r.dist / secs : 0;
+  const now = recentSpeed(r);
+  const kcal = cardioKcal(r.type, r.dist, secs, r.kg, 0);
+  const wall = r.firstAt ? (Date.now() - r.firstAt) / 1000 : 0;
+  return {
+    dist: kmText(r.dist), time: durText(secs), elapsed: durText(wall), pace: paceText(avg), now: paceText(now),
+    speed: speedText(now), avg: speedText(avg), kcal: kcal == null ? '–' : kcalText(kcal),
+    acc: gps.acc == null || r.paused ? '–' : `±${gps.acc}`, gps: gpsLine(r),
+  };
+}
+
+// Runs once a second and on every GPS fix: update the numbers without rebuilding the screen.
 function updateRunScreen() {
   const r = db.activeRun;
   if (!r || tab !== 'today') return;
   const n = runNumbers(r);
   document.querySelectorAll('[data-rs]').forEach((el) => { if (el.dataset.rs in n) el.textContent = n[el.dataset.rs]; });
+  if (!r.gps || touchLock) return;
+  const here = liveHere(r);
+  const map = document.getElementById('run-map');
+  if (!map) { if (here && document.getElementById('run-nomap')) render(); return; }
+  const key = `${r.pts.length}|${here ? here.join(',') : ''}|${gps.acc}`;
+  if (key === mapDrawn) return;
+  mapDrawn = key;
+  map.innerHTML = mapInnerSvg(liveSegs(r), here);
+  const where = document.getElementById('run-where');
+  if (where && here) where.innerHTML = `You are at <span class="num">${here[0].toFixed(5)}, ${here[1].toFixed(5)}</span>${gps.acc != null ? ` (within about ${gps.acc} m)` : ''}. `;
+}
+
+function viewGpsRun(r) {
+  const n = runNumbers(r);
+  const waiting = !r.paused && r.lastResumeAt == null;
+
+  if (touchLock) {
+    return `
+      <div class="run-lock">
+        <p class="muted" style="margin:0">${RUN_NAMES[r.type]} in progress</p>
+        <p class="huge num" style="margin:0"><span data-rs="dist">${n.dist}</span> <span class="unit">km</span></p>
+        <div class="stats two" style="width:100%">
+          ${statHtml('time', n.time, 'moving time', 'lead')}
+          ${statHtml('pace', n.pace, 'avg pace /km', 'lead')}
+        </div>
+        <p class="muted small" data-rs="gps" style="margin:0;text-align:center">${esc(n.gps)}</p>
+        <button type="button" class="btn block" data-hold="unlock">Hold to unlock</button>
+      </div>`;
+  }
+
+  mapDrawn = '';
+  return `${warningsHtml()}
+    <div class="wo-head" style="--plate:var(--plate-green);--plate-ink:#fff">
+      <span class="disc" aria-hidden="true">${r.type === 'walk' ? 'W' : 'R'}</span>
+      <div class="grow">
+        <h2>${RUN_NAMES[r.type]}${r.paused ? ', paused' : ''}</h2>
+        <p class="muted small" data-rs="gps" style="margin:0">${esc(n.gps)}</p>
+      </div>
+    </div>
+    ${waiting && gps.state !== 'error' ? '<div class="notice">The clock starts by itself at the first good GPS fix. This can take up to a minute outdoors, and longer indoors.</div>' : ''}
+    ${'wakeLock' in navigator ? '' : "<div class=\"notice warn\">This browser can't keep the screen on. Set your phone's screen timeout to its longest setting before you run, or tracking stops when the screen turns off.</div>"}
+    <section class="card">
+      <p class="huge num" style="margin:0 0 10px"><span data-rs="dist">${n.dist}</span> <span class="unit">km</span></p>
+      <div class="stats two">
+        ${statHtml('time', n.time, 'moving time', 'lead')}
+        ${statHtml('pace', n.pace, 'avg pace /km', 'lead')}
+      </div>
+      <div class="stats" style="margin-top:6px">
+        ${statHtml('elapsed', n.elapsed, 'elapsed')}
+        ${statHtml('now', n.now, 'pace now /km')}
+        ${statHtml('speed', n.speed, 'km/h now')}
+        ${statHtml('avg', n.avg, 'avg km/h')}
+        ${statHtml('kcal', n.kcal, 'kcal (est.)')}
+        ${statHtml('acc', n.acc, 'GPS, metres')}
+      </div>
+      ${r.kg ? '' : '<p class="muted small" style="margin:10px 0 0">No calories, because there is no weigh-in yet. Log one in Body before your next run.</p>'}
+    </section>
+    <div style="margin-top:12px">${mapHtml(liveSegs(r), liveHere(r), true) || '<div class="card muted small" id="run-nomap">Your route appears here once GPS finds you.</div>'}</div>
+    <div class="finish-bar">
+      <div class="two-col">
+        <button type="button" class="btn" data-action="${r.paused ? 'run-resume' : 'run-pause'}">${r.paused ? 'Resume' : 'Pause'}</button>
+        <button type="button" class="btn" data-action="run-lock">Lock screen</button>
+      </div>
+      <button type="button" class="btn primary block" data-action="run-finish">Finish and save</button>
+      <button type="button" class="btn danger block" data-action="run-discard">Discard</button>
+    </div>
+    <p class="muted small" style="margin-top:14px">Keep this screen on and the app open. Locking the phone or switching apps stops the tracking. Use Lock screen before putting the phone in a pocket or armband. Your location stays on this phone.</p>`;
 }
 
 function viewRun() {
   const r = db.activeRun;
+  if (r.gps) return viewGpsRun(r);
   const n = runNumbers(r);
   return `${warningsHtml()}
     <div class="wo-head" style="--plate:var(--plate-green);--plate-ink:#fff">
@@ -301,6 +672,7 @@ function runStatsHtml(x) {
   if (x.steps != null && x.elapsedSecs - x.secs >= 5) extra.push(`Elapsed time ${durText(x.elapsedSecs)}, pauses and stops included.`);
   if (x.incline) extra.push(`Incline ${x.incline} %.`);
   if (x.kcal == null) extra.push('No calorie estimate: there was no weigh-in to base it on.');
+  if (x.gapSecs >= 30) extra.push(`GPS was lost for about ${durText(x.gapSecs)} (screen off, app in the background, or no signal). Distance across a gap is a straight line, so the real distance is a bit longer.`);
   return `
     <div class="stats">
       ${statHtml('', kmText(x.dist), 'km')}
@@ -315,8 +687,13 @@ function runStatsHtml(x) {
 
 function cardioStartHtml() {
   const what = runType === 'walk' ? 'walk' : 'run';
+  const useGps = runWhere === 'gps';
   return `
-    <button type="button" class="btn plate block" style="--plate:var(--plate-green);--plate-ink:#fff" data-action="run-start-timer">Start ${what} timer</button>`;
+    ${segHtml('run-where', runWhere, [['gps', 'Outdoors, GPS'], ['timer', 'Treadmill, timer']], 'Where')}
+    <button type="button" class="btn plate block" style="--plate:var(--plate-green);--plate-ink:#fff" data-action="${useGps ? 'run-start-gps' : 'run-start-timer'}">Start ${what}${useGps ? '' : ' timer'}</button>
+    <p class="muted small" style="margin:10px 0 0">${useGps
+    ? 'Tracks distance, pace, speed and your route by GPS. Your phone will ask for location permission. The screen has to stay on with this app open the whole time, so it uses more battery than a normal run app. Nothing is sent anywhere.'
+    : 'Counts the time. You enter the distance or speed from the treadmill at the end.'}</p>`;
 }
 
 function viewCardio() {
@@ -341,6 +718,7 @@ function viewCardio() {
       <section class="card">
         <h3 class="sub">Last ${RUN_NAMES[last.type].toLowerCase()}, ${ago(last.finishedAt)} (${runPlace(last)})</h3>
         ${runStatsHtml(last)}
+        ${last.route.length ? `<div style="margin-top:12px">${savedMapHtml(last)}</div>` : ''}
       </section>` : ''}
     <p class="muted small" style="margin-top:14px">Calories are an estimate from the ACSM walking and running equations and your latest weigh-in. Expect it to be off by 10 to 20 percent.</p>`;
 }
@@ -359,8 +737,10 @@ function viewRunHistory() {
         </div>
       </summary>
       ${runStatsHtml(x)}
+      <div class="run-map-slot" style="margin-top:12px"></div>
       <div class="row wrap" style="margin-top:12px;gap:8px">
         <button type="button" class="btn small danger" data-action="run-delete" data-id="${esc(x.id)}">Delete this ${RUN_NAMES[x.type].toLowerCase()}</button>
+        ${x.route.length ? `<button type="button" class="btn small" data-action="route-delete" data-id="${esc(x.id)}">Delete only the route</button>` : ''}
       </div>
     </details>`).join('');
   return `<div class="stack">${items}</div>`;
@@ -372,10 +752,20 @@ function viewRunHistory() {
 
 const CARDIO_ACTIONS = {
   'run-type': (el) => { runType = el.dataset.mode; render(); },
+  'run-where': (el) => { runWhere = el.dataset.mode; render(); },
+  'run-start-gps': () => { startRun(true); },
   'run-start-timer': () => { startRun(false); },
   'run-pause': () => { pauseRun(); render(); },
   'run-resume': () => { resumeRun(); render(); },
-  'run-finish': () => finishTimer(),
+  'run-finish': () => (db.activeRun && db.activeRun.gps ? finishGpsRun() : finishTimer()),
+  'run-lock': () => { touchLock = true; render(); window.scrollTo(0, 0); },
+  'route-delete': (el) => {
+    const x = db.runs.find((y) => y.id === el.dataset.id);
+    if (!x || !confirm('Delete the route of this session and keep its numbers? The route can\'t be brought back.')) return;
+    const ok = commit(() => { db.runs.find((y) => y.id === x.id).route = []; });
+    render();
+    if (ok) toast('Route deleted. The numbers are kept.');
+  },
   'run-discard': () => discardRun(false),
   'cardio-add': () => openSheet({ kind: 'cardio', fromTimer: false }),
   'cardio-save': () => saveCardioForm(),
@@ -387,5 +777,28 @@ const CARDIO_ACTIONS = {
     if (ok) toast('Deleted.');
   },
 };
+
+// Hold the unlock button for a second. A brush against it in a pocket does nothing.
+let holdTimer = null;
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest || !e.target.closest('[data-hold="unlock"]')) return;
+  clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => { touchLock = false; render(); }, 1000);
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach((name) => document.addEventListener(name, () => clearTimeout(holdTimer), true));
+
+// A saved run's route is only drawn when its card is opened, so History doesn't draw every route at once.
+document.addEventListener('toggle', (e) => {
+  const card = e.target;
+  if (!card.matches || !card.matches('details[data-run]') || !card.open) return;
+  const slot = card.querySelector('.run-map-slot');
+  const run = db.runs.find((x) => x.id === card.dataset.run);
+  if (slot && run && !slot.innerHTML) slot.innerHTML = savedMapHtml(run);
+}, true);
+
+// Leaving the app mid-run: save what we have straight away, because tracking is about to stop.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && db.activeRun && db.activeRun.gps && !db.activeRun.paused) save();
+});
 
 setInterval(updateRunScreen, 1000);

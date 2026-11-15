@@ -17,7 +17,7 @@
 
 const STORAGE_KEY = 'gymlog.v1'; // never rename, see AGENTS.md
 const DATA_VERSION = 4;
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.4.1';
 
 // One bumper-plate colour per workout in the rotation (A red, B blue, C yellow, D green, then repeat).
 const PLATES = [
@@ -593,10 +593,41 @@ function restoreRoutine() {
 // sheet is closed (closeSheet() does it then).
 let reloadWaiting = false;
 let reloading = false; // true once the app has asked the browser to reload this window
-function reloadSafely() {
+
+// Recovery data that exists only in this window's memory: saved data that couldn't be read
+// and has no copy yet, or this window's side of a conflict that there was no room to copy.
+// A reload would destroy it, so the app never reloads on its own while this is true.
+// The value is the safety-copy reason to file it under once there is room.
+const MEMORY_ONLY = { unreadable: 'unreadable', skipped: 'skipped', conflict: 'other-window' };
+const recoveryOnlyInMemory = () => !!(recovery && recovery.raw && MEMORY_ONLY[recovery.reason]);
+
+// byOwner is true only when the owner tapped "Reload app" himself, after being offered the download.
+function reloadSafely(byOwner) {
+  if (!byOwner && recoveryOnlyInMemory()) { reloadWaiting = false; return; }
   if (stashRoutine()) { reloading = true; location.reload(); return; }
   reloadWaiting = true;
   toast('Your data changed in another window. Finish or close this routine and the app will reload.');
+}
+
+// The owner has closed the routine a reload was waiting for. Reload now, unless recovery
+// data has become memory-only in the meantime.
+function reloadIfWaiting() {
+  if (!reloadWaiting) return;
+  reloadWaiting = false;
+  if (recoveryOnlyInMemory()) return;
+  reloading = true;
+  location.reload();
+}
+
+// Saving has just been paused, and the notice that offers the download is on the main
+// screen. Cancel any reload that was waiting. Close an open sheet so the notice can be
+// seen, except a started routine: closing that would throw away its ticks and notes.
+function showRecoveryNotice() {
+  reloadWaiting = false;
+  const routineOpen = !!(sheet && sheet.kind === 'routine' && sheet.startedAt != null);
+  if (!routineOpen) closeSheet();
+  render();
+  if (routineOpen) toast('Not saved. Your data changed in another window and the phone has no room for a safety copy. This routine stays open. Close it to download your data.');
 }
 
 // Another window saved first. Keep this window's version (including the change it was
@@ -612,8 +643,7 @@ function handleOtherWindowSave(mine) {
     return;
   }
   recovery = { reason: 'conflict', raw: mine };
-  closeSheet();
-  render();
+  showRecoveryNotice();
 }
 
 // How a tap changes saved data: snapshot, change, save, and undo the change if storage
@@ -2057,14 +2087,21 @@ function closeSheet() {
   const d = $('#sheet');
   if (d.open) d.close();
   sheet = null;
-  if (reloadWaiting) { reloadWaiting = false; reloading = true; location.reload(); } // a reload that waited for a routine
 }
 
 // Closing by the user (✕, backdrop, back gesture). A routine that has been started asks first.
 function userCloseSheet() {
-  if (sheet && sheet.kind === 'routine' && sheet.startedAt != null
-      && !confirm("Stop this routine? It hasn't been saved to your log.")) return;
+  const routine = !!(sheet && sheet.kind === 'routine' && sheet.startedAt != null);
+  // While saving is paused the routine can't be finished here. Put it aside instead of
+  // throwing it away: it reopens after the reload that ends recovery mode.
+  if (routine && recovery && stashRoutine()) {
+    closeSheet();
+    toast('Routine put aside. It reopens after you reload the app.');
+    return;
+  }
+  if (routine && !confirm("Stop this routine? It hasn't been saved to your log.")) return;
   closeSheet();
+  reloadIfWaiting(); // only ever here: when the owner himself has closed the sheet
 }
 
 /* ------------------------------------------------------------------ */
@@ -2394,7 +2431,7 @@ const actions = {
   'recovery-download': () => {
     if (recovery && recovery.raw) downloadText(`gym-log-saved-data-${localDate()}.json`, recovery.raw);
   },
-  'recovery-reload': () => reloadSafely(),
+  'recovery-reload': () => reloadSafely(true),
   'recovery-fresh': () => {
     if (!confirm('Start fresh? This replaces the unreadable data on this phone for good. Download it first if you might need it.')) return;
     // save() refuses while recovery is set, so lift it for this one write and put it back on failure.
@@ -2556,13 +2593,10 @@ window.addEventListener('storage', (e) => {
 
   // Data that only this window holds: unreadable or partly unreadable saved data with no
   // copy yet, or this window's version from an earlier conflict that had no room for a copy.
-  const memoryOnly = { unreadable: 'unreadable', skipped: 'skipped', conflict: 'other-window' };
-  if (recovery && recovery.raw && memoryOnly[recovery.reason]
-      && !keepSafetyCopy(memoryOnly[recovery.reason], recovery.raw)) {
+  if (recoveryOnlyInMemory() && !keepSafetyCopy(MEMORY_ONLY[recovery.reason], recovery.raw)) {
     // No room to keep it, and reloading would lose it. Stay put so it can still be downloaded.
     startupNotice = 'Another window changed your data. Download the data below before you reload, or it will be lost.';
-    closeSheet();
-    render();
+    showRecoveryNotice();
     return;
   }
 
@@ -2573,8 +2607,7 @@ window.addEventListener('storage', (e) => {
     if (!keepSafetyCopy('other-window', mine)) {
       // No room for a copy: don't reload and lose it. Pause saving and offer it as a download.
       recovery = { reason: 'conflict', raw: mine };
-      closeSheet();
-      render();
+      showRecoveryNotice();
       return;
     }
     note = 'Reloaded because your data was changed in another window. What this window had was kept as a safety copy in More > Backup and settings.';
